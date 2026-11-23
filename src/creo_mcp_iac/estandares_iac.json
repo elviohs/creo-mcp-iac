@@ -1,0 +1,24 @@
+{
+  "_nota": "Reglas de revisión de estándares de creo-mcp-iac. Valores de partida propuestos por el asistente el 2026-11-22: el departamento debe revisarlos. Se puede usar otro fichero con CREO_MCP_ESTANDARES=<ruta>.",
+  "obligatorios": ["CODIGO_PLANO", "PROYECTO", "PIEZA", "PTC_MATERIAL_NAME"],
+  "codigo_plano": {
+    "por_proyecto": {"EJEMPLO": "^EJM-DWG-\\d{6}-\\d{4}-\\d{2}$"},
+    "general": "^[A-Z]{2,5}-DWG-\\d{6}-\\d{4}-\\d{2}$",
+    "comercial": ["NA", "N/A", "N.A.", "COMERCIAL"]
+  },
+  "unidad_longitud": "mm",
+  "valido_para_fabricacion": ["FABRICACION", "FABRICACIÓN"],
+  "estados_no_liberados": ["PRELIMINAR", "EN TRABAJO", "INWORK", "IN WORK", "BORRADOR"],
+  "campos_uniformes": ["VALIDO_PARA", "TOLERANCIA", "PROTECCION_SUPERFICIAL", "TRATAMIENTO", "RUGOSIDAD"],
+  "materiales": [
+    {"patron": "PVC", "ambito": "vacio", "motivo": "Desgasificación alta (plastificantes); no recomendado en vacío."},
+    {"patron": "NYLON|POLIAMIDA|\\bPA6|\\bPA66", "ambito": "vacio", "motivo": "Absorbe agua y desgasifica; evitar en vacío o secar y validar."},
+    {"patron": "CAUCHO|NITRIL|\\bNBR\\b|NEOPRENO|SILICON|EPDM", "ambito": "vacio", "motivo": "Elastómero con desgasificación alta; usar uno apto para vacío (p. ej. FKM) y validarlo."},
+    {"patron": "LATON|LATÓN|BRASS|\\bCUZN", "ambito": "vacio", "motivo": "Contiene zinc, que sublima con el horneado; evitar si hay horneado."},
+    {"patron": "CADMI|GALVANIZ|ZINCAD|\\bZN\\b", "ambito": "vacio", "motivo": "Cadmio o zinc: subliman en vacío; no usar."},
+    {"patron": "\\bPLA\\b|\\bABS\\b|PETG", "ambito": "vacio", "motivo": "Plástico de impresión 3D con desgasificación alta; validar antes de usar en vacío."},
+    {"patron": "MADERA|CARTON|CARTÓN|PAPEL", "ambito": "vacio", "motivo": "Material poroso; no apto para vacío."},
+    {"patron": "PVC|\\bABS\\b|POLIESTIRENO|METACRILATO|PMMA", "ambito": "criogenia", "motivo": "Plástico frágil a baja temperatura."},
+    {"patron": "^(ACERO(?!.*INOX)|STEEL(?!.*STAINLESS)|F-?11\\d\\d|C45|S235|S275|S355)", "ambito": "criogenia", "motivo": "Acero al carbono o de baja aleación: fragilidad por debajo de su temperatura de transición dúctil-frágil. Confirmar el material y la temperatura de servicio."}
+  ]
+}

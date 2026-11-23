@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "creo-mcp-iac"
+version = "0.11.0"
+description = "Servidor MCP para Creo Parametric (CREOSON + Creo Toolkit) del Dpto. de Ingeniería Mecánica del IAC"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.12,<2",
+    "creopyson==0.7.8",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "openpyxl>=3.1"]
+
+[project.scripts]
+creo-mcp-iac = "creo_mcp_iac.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/creo_mcp_iac"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

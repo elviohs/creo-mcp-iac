@@ -1,0 +1,31 @@
+# --- entorno y cachés ---
+.venv/
+.venv_*/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# --- datos locales: nunca al repositorio ---
+audit.jsonl
+logs/
+export/
+*.stp
+*.step
+*.log
+*.log.*
+*.xlsx
+prueba_*.py
+prueba_*.json
+tools/
+anadir_a_claude.py
+claude_desktop_config.json
+HISTORIAL_INTERNO.md
+subir_github.cmd.bak
+
+# --- compilación del programa nativo: no se sube nada (tampoco el .exe, que enlaza
+#     librerías de PTC con licencia Educational); cada PC lo compila con compilar.cmd ---
+native/build/
+*.exe
+*.obj
+*.lib
+*.exp
