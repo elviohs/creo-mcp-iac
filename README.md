@@ -110,8 +110,9 @@ Variables de entorno del servidor (bloque `env` en `claude_desktop_config.json`)
 | `CREO_MCP_EXPORT_DIR` | *(vacía = sin exportar)* | Carpeta autorizada para Excel, STEP y PDF (Creo debe poder escribir en ella) |
 | `CREO_MCP_AUDIT_LOG` | `~/.creo_mcp_iac/audit.jsonl` | Registro de auditoría |
 | `CREO_MCP_ALLOW_PARAMETERS` | `0` | `1` = activa `aplicar_parametros_excel` |
-| `CREO_MCP_ALLOW_OPERACIONES` | `0` | `1` = activa `crear_taladros`, `crear_patron` y `borrar_operaciones_ia` (además, el servicio con `--escritura`) |
+| `CREO_MCP_ALLOW_OPERACIONES` | `0` | `1` = activa `crear_taladros`, `crear_patron`, `crear_redondeos`, `crear_chaflanes` y `borrar_operaciones_ia` (además, el servicio con `--escritura`). Es el interruptor principal de la escritura |
 | `CREO_MCP_ALLOW_DRAWINGS` | `0` | `1` = herramientas experimentales de planos nativos (no recomendadas) |
+| `CREO_MCP_CONTRACCION` | `contraccion_iac.json` del paquete | Tabla de contracción térmica (ΔL/L desde 293 K) de `holguras_creo` |
 | `CREO_MCP_ESTANDARES` | `estandares_iac.json` del paquete | Fichero de reglas de `revisar_estandares` (los formatos de código de plano de cada proyecto van aquí) |
 | `CREO_MCP_CREO_COMMON` | `C:\Program Files\PTC\Creo 12.4.1.0\Common Files` | De aquí salen `pro_comm_msg.exe` y las DLL de Creo |
 | `CREO_MCP_HOL_DIR` | `<Common Files>\text\hole` | Tablas de taladros de Creo (`ISO.hol`) |
@@ -125,7 +126,10 @@ Variables de entorno del servidor (bloque `env` en `claude_desktop_config.json`)
 su paquete y desde ahí `creo_iac_tk.exe` no encuentra la sesión de Creo. `native/servicio_tk.py`
 se arranca fuera de Claude (lo hace el arranque único `iniciar_creo_iac.cmd`), escucha solo en
 `127.0.0.1` y solo acepta las órdenes conocidas; las de escritura, solo si se arranca con
-`--escritura`.
+`--escritura`. El arranque único lo hace con escritura por defecto (`$ServicioEscritura = $true` en
+`iniciar_creo_iac.ps1`), porque nada se guarda y cada cambio exige confirmación; mientras
+`CREO_MCP_ALLOW_OPERACIONES` no valga `1`, el asistente no puede escribir aunque el servicio lo admita.
+Para arrancarlo en solo lectura, `$ServicioEscritura = $false`.
 
 ## Licencia de Creo Toolkit
 

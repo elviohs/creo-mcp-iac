@@ -19,7 +19,9 @@ Toolkit no permite otro uso. El detalle de cada herramienta está en `README.md`
     «Desarrollo de escritorio con C++»;
   - o pedírselo al responsable y copiarlo en `native\build\creo_iac_tk.exe`.
   Sin él funcionan las herramientas de CREOSON, pero no las nativas (interferencias, taladros,
-  patrones).
+  patrones, redondeos, chaflanes, taladros conjugados y holguras).
+  Versión mínima: **`creo_iac_tk` 0.6.1** (la necesitan `holguras_creo` y `taladros_conjugados`).
+  Un `.exe` anterior sigue sirviendo para el resto, pero hay que recompilarlo o pedir uno nuevo.
 
 ## 2. Carpetas
 
@@ -53,7 +55,8 @@ Para actualizar más adelante: `git pull` en esa carpeta y reiniciar Claude.
 ## 3 bis. Programa nativo
 
 Doble clic en `native\compilar.cmd`. Debe terminar con «COMPILACION CORRECTA» y dejar
-`native\build\creo_iac_tk.exe`. Si el enlazador dice «no se puede escribir el archivo», cierra la
+`native\build\creo_iac_tk.exe`. La versión del programa sale en `creo_capacidades` y en la
+`fuente` de las herramientas nativas (`creo_iac_tk 0.6.1`). Si el enlazador dice «no se puede escribir el archivo», cierra la
 ventana del servicio de lecturas nativas y repite. Vuelve a compilar cada vez que `git pull` traiga
 cambios en `native\src`.
 
@@ -93,15 +96,25 @@ Reinicia Claude. Prueba: pide al asistente «comprueba la conexión con Creo» (
 
 ## 7. Escritura en Creo (opcional, desactivada por defecto)
 
-Por defecto el asistente solo lee y exporta ficheros nuevos. Cada escritura se activa aparte, se
-confirma con una tabla y **nunca guarda** (guardas tú en Creo y registras en Windchill):
+Por defecto el asistente solo lee y exporta ficheros nuevos. Cada escritura se activa aparte en
+`claude_desktop_config.json`, se confirma con una tabla y **nunca guarda** (guardas tú en Creo y
+registras en Windchill). El arranque único ya abre el servicio con escritura
+(`$ServicioEscritura = $true`); el interruptor que decide es la variable de Claude:
 
 | Qué | Cómo se activa |
 |---|---|
 | Parámetros del cajetín desde el Excel del BOM | `"CREO_MCP_ALLOW_PARAMETERS": "1"` en `env` |
-| Taladros, cajeados, avellanados y patrones | `"CREO_MCP_ALLOW_OPERACIONES": "1"` en `env` y el servicio con escritura: `$ServicioEscritura = $true` en `iniciar_creo_iac.ps1` (o `iniciar_creo_iac.cmd -Escritura`) |
+| Taladros, cajeados, avellanados, patrones, redondeos y chaflanes | `"CREO_MCP_ALLOW_OPERACIONES": "1"` en `env` (el servicio ya arranca con escritura; para solo lectura, `$ServicioEscritura = $false` en `iniciar_creo_iac.ps1`) |
 
-Prueba primero las escrituras con una pieza de prueba que no esté en Windchill.
+Prueba primero las escrituras con una pieza de prueba que no esté en Windchill. Lo creado queda en
+la sesión de Creo con nombre `IA_*`: si guardas la pieza, se guarda con ella.
+
+## 7 bis. Holguras en frío
+
+`holguras_creo` usa la tabla de contracción `src\creo_mcp_iac\contraccion_iac.json` (datos del
+departamento: NIST de la calculadora y librería ANSYS v4). Para usar otra tabla, añade
+`"CREO_MCP_CONTRACCION": "<ruta del .json>"` en `env`. Los materiales que no están en la tabla se
+quedan sin cálculo en frío; se pueden indicar pieza a pieza al pedir el cálculo.
 
 ## 8. Problemas frecuentes
 
