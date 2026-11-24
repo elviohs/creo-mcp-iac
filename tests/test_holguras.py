@@ -107,6 +107,13 @@ def test_candidatos_y_frio():
     ac2 = next(x for x in r2["filas"] if x["b"] == "C.PRT #1" and x["a"] == "A.PRT #1")
     assert ac2["distancia_frio"] == pytest.approx(ac["distancia_frio"], abs=1e-6)
     # sin material en C
+    res2 = {**res, "pares": res["pares"] + [{"n": 0, "error": -1}]}
+    rf = hg.revisar_holguras(lista, cand, res2, 2.0, 0.5)
+    assert rf["fallidos"] == 1 and rf["lista_fallidos"][0]["codigo"] == -1
+    assert "GENERAL_ERROR" in rf["lista_fallidos"][0]["error"] and rf["lista_fallidos"][0]["a"] == "B.PRT #1"
+    res3 = {**res, "pares": [dict(res["pares"][0], superficies=True)] + res["pares"][1:]}
+    rs = hg.revisar_holguras(lista, cand, res3, 2.0, 0.5)
+    assert sum(1 for f in rs["filas"] if f.get("superficies")) == 1 and any("superficies" in x for x in rs["avisos"])
     r3 = hg.revisar_holguras(lista, cand, res, 2.0, 0.5, temperatura=77, tabla=t)
     assert any("C.PRT (sin material)" in a for a in r3["avisos"])
     assert sum(1 for x in r3["filas"] if x["estado_frio"] == "sin datos de contracción") == 2

@@ -31,6 +31,10 @@ from typing import Any, Callable
 from .nativo import nombre_fichero
 
 CONTACTO = 1e-4      # mm: por debajo, las piezas se tocan
+ERRORES_TK = {-1: "PRO_TK_GENERAL_ERROR (Creo no pudo calcular la distancia)", -2: "PRO_TK_BAD_INPUTS",
+              -4: "PRO_TK_E_NOT_FOUND", -8: "PRO_TK_BAD_CONTEXT", -9: "PRO_TK_NOT_IMPLEMENTED",
+              -23: "PRO_TK_NOT_EXIST (componente o geometría no encontrados)", -26: "PRO_TK_NOT_VALID",
+              -27: "PRO_TK_INVALID_ITEM"}
 
 
 # ------------------------------------------------------------------ materiales
@@ -220,6 +224,8 @@ def revisar_holguras(lista: list[dict[str, Any]], pares: list[tuple[int, int, fl
 
     filas = []
     fallidos = 0
+    lista_fallidos: list[dict[str, Any]] = []
+    con_superficies = 0
     for r in resultado.get("pares", []):
         k = r.get("n")
         if not isinstance(k, int) or k >= len(pares):
@@ -228,6 +234,10 @@ def revisar_holguras(lista: list[dict[str, Any]], pares: list[tuple[int, int, fl
         a, b = lista[i], lista[j]
         if "error" in r:
             fallidos += 1
+            cod = r.get("error")
+            lista_fallidos.append({"a": a["pieza"], "b": b["pieza"], "ruta_a": a["ruta"], "ruta_b": b["ruta"],
+                                   "codigo": cod, "error": ERRORES_TK.get(cod, f"código {cod}"),
+                                   "material_a": a.get("material"), "material_b": b.get("material")})
             continue
         d = float(r["distancia"])
         if d > umbral and not r.get("interferencia"):
@@ -244,6 +254,9 @@ def revisar_holguras(lista: list[dict[str, Any]], pares: list[tuple[int, int, fl
         fila: dict[str, Any] = {"estado": estado, "a": a["pieza"], "b": b["pieza"], "ruta_a": a["ruta"],
                                 "ruta_b": b["ruta"], "distancia": round(d, 4),
                                 "punto_a": [round(x, 3) for x in pa], "punto_b": [round(x, 3) for x in pb]}
+        if r.get("superficies"):
+            fila["superficies"] = True       # calculada con superficies: una pieza no tiene sólido
+            con_superficies += 1
         if temperatura is not None or temperaturas:
             ea, ma, ta = eps(a)
             eb, mb, tb = eps(b)
@@ -287,7 +300,12 @@ def revisar_holguras(lista: list[dict[str, Any]], pares: list[tuple[int, int, fl
 
     filas.sort(key=clave)
     if fallidos:
-        avisos.append(f"Creo no pudo calcular la distancia de {fallidos} pares.")
+        avisos.append(f"Creo no pudo calcular la distancia de {fallidos} pares (ver pares_sin_calcular). Lo "
+                      "habitual es que una de las piezas no tenga sólido (superficies importadas de un fabricante: "
+                      "volumen 0 en propiedades_masa).")
+    if con_superficies:
+        avisos.append(f"{con_superficies} pares se han calculado incluyendo superficies o facetas porque una de las piezas no "
+                      "tiene sólido; las interferencias con esas piezas no las ve interferencias_creo.")
     if resultado.get("truncado"):
         avisos.append("El cálculo se cortó por tiempo: no se han revisado todos los pares. Baja el umbral o "
                       "revisa un subconjunto.")
@@ -304,5 +322,5 @@ def revisar_holguras(lista: list[dict[str, Any]], pares: list[tuple[int, int, fl
         if "estado_frio" in f:
             cuenta_frio[f["estado_frio"]] = cuenta_frio.get(f["estado_frio"], 0) + 1
     return {"filas": filas, "por_estado": cuenta, "por_estado_frio": cuenta_frio, "avisos": avisos,
-            "calculados": resultado.get("calculados"), "fallidos": fallidos,
+            "calculados": resultado.get("calculados"), "fallidos": fallidos, "lista_fallidos": lista_fallidos,
             "segundos": resultado.get("segundos")}

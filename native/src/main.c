@@ -70,7 +70,7 @@
 #include <time.h>
 #include "salida.h"
 
-#define VERSION_TK "0.6.1"
+#define VERSION_TK "0.6.3"
 #define MAX_MODELOS 20000
 
 static ProProcessHandle sesion;
@@ -701,6 +701,7 @@ static int orden_holguras(const char *modelo, const char *fichero)
         ProSelection sa = NULL, sb = NULL;
         double dist = 0.0, proy = 0.0;
         ProBoolean interf = PRO_B_FALSE;
+        int superficies = 0;
         Pro3dPnt pts[2];
         ProAsmcomppath rutaa, rutab;
         ProMdl mdla = NULL, mdlb = NULL;
@@ -715,12 +716,24 @@ static int orden_holguras(const char *modelo, const char *fichero)
             if (e == PRO_TK_BAD_INPUTS)   /* por si no admite referencia de proyeccion nula */
                 e = ProFitClearanceCompute(sa, PRO_FIT_INCLUDE_NONE, sb, PRO_FIT_INCLUDE_NONE,
                                            PRO_FIT_WHOLE_SURFACE, sa, PRO_B_FALSE, &dist, &proy, &interf, pts);
+            if (e == PRO_TK_GENERAL_ERROR) {
+                /* una de las piezas no tiene solido (p. ej. superficies importadas de un
+                   fabricante): se repite incluyendo las superficies */
+                e = ProFitClearanceCompute(sa, PRO_FIT_INCLUDE_FROM_QUILTS, sb, PRO_FIT_INCLUDE_TO_QUILTS,
+                                           PRO_FIT_WHOLE_SURFACE, NULL, PRO_B_FALSE, &dist, &proy, &interf, pts);
+                if (e == PRO_TK_GENERAL_ERROR)   /* geometria importada como facetas (malla) */
+                    e = ProFitClearanceCompute(sa, PRO_FIT_INCLUDE_FROM_FACETS_N_QUILTS, sb,
+                                               PRO_FIT_INCLUDE_TO_FACETS_N_QUILTS, PRO_FIT_WHOLE_SURFACE, NULL,
+                                               PRO_B_FALSE, &dist, &proy, &interf, pts);
+                if (e == PRO_TK_NO_ERROR) superficies = 1;
+            }
         }
         j_abrir_obj();
         j_int("n", n);
         if (e == PRO_TK_NO_ERROR) {
             j_num("distancia", dist);
             j_bool("interferencia", interf == PRO_B_TRUE);
+            if (superficies) j_bool("superficies", 1);
             j_abrir_lista("puntos");
             for (i = 0; i < 2; i++) {
                 j_abrir_lista(NULL);

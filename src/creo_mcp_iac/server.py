@@ -1357,14 +1357,15 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
             fname, ruta = _nuevo_fichero("HOLGURAS", conj, nombre_fichero)
             u = unidad or "?"
             frio = temperatura is not None or bool(temperaturas)
-            cab = ["Estado", "Pieza A", "Pieza B", f"Holgura ({u})", "Punto A", "Punto B"]
+            cab = ["Estado", "Pieza A", "Pieza B", f"Holgura ({u})", "Punto A", "Punto B", "Geometría"]
             if frio:
                 cab += ["Material A", "Material B", "T A (K)", "T B (K)", "ΔL/L A", "ΔL/L B",
                         f"Holgura en frío ({u})", f"Cambio ({u})", "Estado en frío", "Cálculo en frío"]
             hoja = [_cab(*cab)]
             for f in filas:
                 fila = [f["estado"], f["a"], f["b"], (f["distancia"], xlsx_mod.NUM3),
-                        " ".join(f"{c:g}" for c in f["punto_a"]), " ".join(f"{c:g}" for c in f["punto_b"])]
+                        " ".join(f"{c:g}" for c in f["punto_a"]), " ".join(f"{c:g}" for c in f["punto_b"]),
+                        "con superficies o facetas (pieza sin sólido)" if f.get("superficies") else "sólidos"]
                 if frio:
                     fila += [f.get("material_a") or "", f.get("material_b") or "", f.get("temperatura_a"),
                              f.get("temperatura_b"), f.get("contraccion_a"), f.get("contraccion_b"),
@@ -1390,7 +1391,13 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
                                "orden (contracción alrededor del punto fijo); comprobar las críticas con un análisis."]]
             hojas = [{"nombre": "Resumen", "filas": resumen, "anchos": [34, 70]},
                      {"nombre": "Holguras", "filas": hoja, "fijar_cabecera": True, "autofiltro": len(hoja),
-                      "anchos": [16, 34, 34, 12, 26, 26] + ([22, 22, 8, 8, 11, 11, 14, 12, 20, 30] if frio else [])}]
+                      "anchos": [16, 34, 34, 12, 26, 26, 22] + ([22, 22, 8, 8, 11, 11, 14, 12, 20, 30] if frio else [])}]
+            if rev["lista_fallidos"]:
+                hf = [_cab("Pieza A", "Pieza B", "Ruta A", "Ruta B", "Código", "Error de Creo Toolkit")]
+                hf += [[x["a"], x["b"], "/".join(map(str, x["ruta_a"])), "/".join(map(str, x["ruta_b"])), x["codigo"],
+                        x["error"]] for x in rev["lista_fallidos"]]
+                hojas.append({"nombre": "Sin calcular", "filas": hf, "anchos": [36, 36, 14, 14, 8, 50],
+                              "fijar_cabecera": True})
             if mats:
                 hm = [_cab("Pieza", "Material en Creo", "Material de la tabla", "T (K)", "ΔL/L")]
                 hm += [[k, v["material_creo"] or "", v["material_tabla"] or "SIN DATOS", v["temperatura"],
@@ -1409,6 +1416,7 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
                     "materiales": mats} if mats else {}),
                 "problemas": problemas[:60], "problemas_mostrados": min(60, len(problemas)),
                 "problemas_total": len(problemas),
+                **({"pares_sin_calcular": rev["lista_fallidos"][:40]} if rev["lista_fallidos"] else {}),
                 **({"avisos": avisos} if avisos else {}),
                 "carpeta": str(settings.export_dir) if fichero else None, "fichero": fichero,
                 "fuente": "Creo Toolkit (ProFitClearanceCompute) y tabla de contracción "
