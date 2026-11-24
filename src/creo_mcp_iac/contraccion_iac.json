@@ -1,0 +1,73 @@
+{
+  "_descripcion": "Contracción térmica integrada ΔL/L = (L_T - L_293)/L_293 para holguras_creo. Datos de partida del Departamento de Ingeniería Mecánica del IAC; revisables. 'poly': Σ c_i·T^i × escala, válido en 'rango' (por debajo se toma el valor del extremo inferior, como la calculadora del departamento). 'tabla': puntos [T, valor × escala] con interpolación lineal. 'alias': expresiones regulares que se buscan en el nombre del material de Creo (en mayúsculas); gana el primer material que coincide. Otra tabla: variable CREO_MCP_CONTRACCION.",
+  "temperatura_referencia_K": 293,
+  "materiales": [
+    {
+      "nombre": "Cobre-berilio",
+      "alias": ["CUBE", "CU-BE", "BERYL", "C17200", "CUBE2"],
+      "tipo": "poly", "coef": [-311.5, -0.44498, 0.010133, -2.4718e-5, 2.6277e-8], "escala": 1e-5, "rango": [24, 300],
+      "fuente": "NIST, coeficientes de la calculadora del departamento (KB-MAT-0001)"
+    },
+    {
+      "nombre": "Aluminio 6061-T6",
+      "alias": ["6061", "6082", "5083", "7075", "ALUMIN", "^AL[ _-]?\\d", "^AA[ _-]?\\d", "^AL$", "SIMAGALTOK"],
+      "tipo": "poly", "coef": [-412.77, -0.30389, 0.0087696, -9.9821e-6, 0], "escala": 1e-5, "rango": [18, 300],
+      "fuente": "NIST, coeficientes de la calculadora del departamento (KB-MAT-0001)",
+      "nota": "Se aplica también a 6082, 5083 y 7075 (la librería ANSYS del departamento da a 6061 y 6082 la misma dilatación). Por debajo de 18 K, constante."
+    },
+    {
+      "nombre": "Acero inoxidable AISI 304/316",
+      "alias": ["304", "316", "INOX", "STAINLESS", "SS[ _-]?3", "1\\.4301", "1\\.4404", "1\\.4401"],
+      "tipo": "poly", "coef": [-295.54, -0.39811, 0.0092683, -2.0261e-5, 1.7127e-8], "escala": 1e-5, "rango": [4, 300],
+      "fuente": "NIST, coeficientes de la calculadora del departamento (KB-MAT-0001); NIST da el mismo ajuste para 304 y 316"
+    },
+    {
+      "nombre": "Cobre OFHC/ETP",
+      "alias": ["OFHC", "OFE", "ETP", "C10100", "C10200", "C11000", "COPPER", "COBRE", "^CU($|[ _-])"],
+      "tipo": "tabla", "puntos": [[4, -326], [77, -304], [130, -248], [293, 0]], "escala": 1e-5,
+      "fuente": "Librería ANSYS del departamento v4, integrando α instantáneo (KB-MAT-0002 rC, § 3.1)",
+      "nota": "Interpolación lineal entre 130 y 293 K: error de unas pocas unidades × 10⁻⁵."
+    },
+    {
+      "nombre": "G-10 (normal al laminado)",
+      "alias": ["G-?10.*NORM", "FR-?4.*NORM"],
+      "tipo": "poly", "coef": [-719.8, 0.4455, 0.007505, -2.219e-6, 0], "escala": 1e-5, "rango": [10, 300],
+      "fuente": "NIST, dirección normal, coeficientes de la calculadora del departamento (KB-MAT-0001)",
+      "nota": "Material de Creo G10_NORMAL: G-10 con las propiedades orientadas a la normal (indicación del responsable, 2026-11-24)."
+    },
+    {
+      "nombre": "G-10 (en el plano del laminado)",
+      "alias": ["G-?10", "FR-?4"],
+      "tipo": "poly", "coef": [-246.9, 0.2064, 0.003072, -3.226e-6, 0], "escala": 1e-5, "rango": [12, 300],
+      "fuente": "NIST, dirección de la urdimbre, coeficientes de la calculadora del departamento (KB-MAT-0001)",
+      "nota": "En la dirección normal al laminado la contracción es unas tres veces mayor: si la holgura es en esa dirección, indicar el material 'G-10 (normal al laminado)'."
+    },
+    {
+      "nombre": "Invar 36",
+      "alias": ["INVAR", "FE[ _-]?36", "36[ _-]?NI", "1\\.3912"],
+      "tipo": "poly", "coef": [-52.65, 0.1009, 0.0008395, -1.973e-6, 8.794e-11], "escala": 1e-5, "rango": [80, 300],
+      "fuente": "Calculadora del departamento corregida el 2026-11-13 (KB-MAT-0001, § 3.1); no contrastado con NIST",
+      "nota": "Constante por debajo de 80 K (extrapolación de la calculadora)."
+    },
+    {
+      "nombre": "Ti-6Al-4V",
+      "alias": ["TI[ _-]?6AL[ _-]?4V", "TI6", "TITAN", "^TI($|[ _-])", "GRADE ?5"],
+      "tipo": "poly", "coef": [-171.1, -0.214, 0.004807, -7.111e-6, 0], "escala": 1e-5, "rango": [24, 300],
+      "fuente": "Polinomio que la calculadora del departamento tiene asignado al PTFE (KB-MAT-0001, § 2)",
+      "nota": "HIPÓTESIS DEL ASISTENTE (2026-11-24): da −0,17 % a 4 K, lo propio del Ti-6Al-4V y no del PTFE (≈ −2 %). Parece que la calculadora tiene intercambiados los polinomios. Verificar con NIST antes de usarlo para decidir."
+    },
+    {
+      "nombre": "PTFE",
+      "alias": ["PTFE", "TEFLON"],
+      "tipo": "poly", "coef": [-2120, -0.8201, 0.06161, -0.0003171, 6.85e-7], "escala": 1e-5, "rango": [4, 300],
+      "fuente": "Polinomio que la calculadora del departamento tenía asignado al Invar antes de corregirla (KB-MAT-0001, § 2)",
+      "nota": "HIPÓTESIS DEL ASISTENTE (2026-11-24): da −2,1 % a 4 K, lo propio del PTFE. Verificar con NIST antes de usarlo para decidir."
+    },
+    {
+      "nombre": "PEEK",
+      "alias": ["PEEK"],
+      "tipo": "tabla", "puntos": [[5, -702], [77, -656], [130, -564], [293, 0]], "escala": 1e-5,
+      "fuente": "Librería ANSYS del departamento v4 (KB-MAT-0002 rC, § 3.1); tabla de origen [BIB] no contrastada"
+    }
+  ]
+}

@@ -28,10 +28,11 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 PUERTO = 9057
 ORDENES = {"estado": 30, "interferencias": 900, "taladros": 600, "posiciones": 300, "caras": 60, "seleccion": 30,
-           "arbol": 60, "aristas": 60}
+           "arbol": 60, "aristas": 60, "holguras": 600}
+MAX_PARES = 20000
 # Escritura en Creo (nunca guarda): solo si el servicio se arranca con --escritura.
 ESCRITURA = {"crear": 120, "borrar": 60}
 PERMITE_ESCRITURA = "--escritura" in sys.argv
@@ -63,6 +64,18 @@ def plan_valido(texto) -> bool:
     return 0 < len(lineas) <= 200 and all(PLAN_RE.match(x) for x in lineas)
 
 
+def pares_validos(pares) -> bool:
+    def ruta(r):
+        return isinstance(r, list) and 0 < len(r) <= 25 and all(isinstance(i, int) and not isinstance(i, bool)
+                                                                 and i > 0 for i in r)
+    return (isinstance(pares, list) and 0 < len(pares) <= MAX_PARES
+            and all(isinstance(p, list) and len(p) == 2 and ruta(p[0]) and ruta(p[1]) for p in pares))
+
+
+def texto_pares(pares) -> str:
+    return "".join(f"{'/'.join(map(str, a))} {'/'.join(map(str, b))}\n" for a, b in pares)
+
+
 def ejecutar(peticion: dict, runner=subprocess.run) -> tuple[int, dict]:
     """Valida la petición y lanza creo_iac_tk.exe. Devuelve (código HTTP, respuesta)."""
     orden = peticion.get("orden")
@@ -82,6 +95,15 @@ def ejecutar(peticion: dict, runner=subprocess.run) -> tuple[int, dict]:
         fichero = carpeta / f"plan_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{int(time.time() * 1000) % 1000:03d}.txt"
         fichero.write_text(plan, encoding="ascii")
         args += ["--plan", str(fichero)]
+    if orden == "holguras":
+        pares = peticion.get("pares")
+        if not pares_validos(pares):
+            return 400, {"ok": False, "fase": "servicio", "codigo": -1, "error": "Pares no válidos"}
+        carpeta = EXE.parent / "planes"
+        carpeta.mkdir(exist_ok=True)
+        fichero = carpeta / f"pares_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.txt"
+        fichero.write_text(texto_pares(pares), encoding="ascii")
+        args += ["--pares", str(fichero)]
     if orden == "arbol" and peticion.get("ids") is not None:
         ids = peticion.get("ids")
         if not (isinstance(ids, list) and 0 < len(ids) <= 64 and all(isinstance(i, int) and i > 0 for i in ids)):

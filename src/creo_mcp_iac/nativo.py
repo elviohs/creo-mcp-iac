@@ -39,7 +39,9 @@ ORDENES: dict[str, float] = {
     "seleccion": 30,
     "arbol": 60,
     "aristas": 60,
+    "holguras": 600,
 }
+MAX_PARES = 20000
 # Escritura en Creo (nunca guarda). Solo con CREO_MCP_ALLOW_OPERACIONES=1 en el servidor y
 # el servicio arrancado con --escritura.
 ESCRITURA: dict[str, float] = {"crear": 120, "borrar": 60}
@@ -47,6 +49,15 @@ ESCRITURA: dict[str, float] = {"crear": 120, "borrar": 60}
 _MODELO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]{0,79}\.(PRT|ASM)$", re.IGNORECASE)
 
 CREATE_NO_WINDOW = 0x08000000
+
+
+def _pares_validos(pares: Any) -> bool:
+    def ruta(r: Any) -> bool:
+        return isinstance(r, list) and 0 < len(r) <= 25 and all(
+            isinstance(i, int) and not isinstance(i, bool) and i > 0 for i in r)
+    return (isinstance(pares, list) and 0 < len(pares) <= MAX_PARES
+            and all(isinstance(p, (list, tuple)) and len(p) == 2 and ruta(list(p[0])) and ruta(list(p[1]))
+                    for p in pares))
 
 
 class NativoError(RuntimeError):
@@ -110,7 +121,7 @@ class Nativo:
         return env
 
     def _por_servicio(self, orden: str, modelo: str | None, rapido: bool, plan: str | None = None,
-                      ids: list[int] | None = None) -> dict[str, Any]:
+                      ids: list[int] | None = None, pares: list | None = None) -> dict[str, Any]:
         t0 = time.perf_counter()
         error = None
         datos: dict[str, Any] = {"orden": orden, "modelo": modelo.upper() if modelo else None, "rapido": bool(rapido)}
@@ -118,6 +129,8 @@ class Nativo:
             datos["plan"] = plan
         if ids:
             datos["ids"] = ids
+        if pares is not None:
+            datos["pares"] = pares
         try:
             with self.lock:
                 r = self._http("POST", "/orden", datos, (ORDENES.get(orden) or ESCRITURA[orden]) + 15)
@@ -173,7 +186,8 @@ class Nativo:
 
     # -- ejecución ------------------------------------------------------
     def ejecutar(self, orden: str, modelo: str | None = None, rapido: bool = False,
-                 plan: str | None = None, ids: list[int] | None = None) -> dict[str, Any]:
+                 plan: str | None = None, ids: list[int] | None = None,
+                 pares: list | None = None) -> dict[str, Any]:
         if orden in ESCRITURA:
             if not self.escritura:
                 raise NativoError("La escritura en Creo está desactivada (CREO_MCP_ALLOW_OPERACIONES=1).")
@@ -186,10 +200,12 @@ class Nativo:
 
             if not plan or not plan_valido(plan):
                 raise NativoError("Plan de operación no válido.")
+        if orden == "holguras" and not _pares_validos(pares):
+            raise NativoError("Pares de componentes no válidos.")
         if (orden == "borrar" or ids) and not (ids and all(isinstance(i, int) and i > 0 for i in ids)):
             raise NativoError("Ids de operaciones no válidos.")
         if self.url:
-            return self._por_servicio(orden, modelo, rapido, plan, ids)
+            return self._por_servicio(orden, modelo, rapido, plan, ids, pares)
         ok, motivo = self.disponible()
         if not ok:
             raise NativoError(f"Las lecturas nativas de Creo no están disponibles: {motivo}")
@@ -206,6 +222,13 @@ class Nativo:
             args += ["--plan", str(fichero)]
         if ids:
             args += ["--ids", ",".join(map(str, ids))]
+        if pares is not None:
+            carpeta = self.exe.parent / "planes"
+            carpeta.mkdir(exist_ok=True)
+            fichero = carpeta / f"pares_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+            fichero.write_text("".join(f"{'/'.join(map(str, a))} {'/'.join(map(str, b))}\n" for a, b in pares),
+                               encoding="ascii")
+            args += ["--pares", str(fichero)]
         limite = ORDENES.get(orden) or ESCRITURA[orden]
         t0 = time.perf_counter()
         error = None

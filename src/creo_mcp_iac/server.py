@@ -21,11 +21,15 @@ from . import estandares as estandares_mod
 from . import masas as masas_mod
 from . import xlsx as xlsx_mod
 from .bom import build_bom
+from .conjugados import revisar_conjugados
+from .holguras import (buscar_material, candidatos, cargar_tabla, contraccion, piezas, punto_de_seleccion,
+                       revisar_holguras)
 from .config import Settings
 from .formato import add_dim_text, blank, check_mass_param, clean_params, massprops_si, note_has_person, note_text
 from .gateway import CAJETIN_PARAMS, CONFIG_OPTIONS, CreoGateway, CreoUnavailableError, NotAllowedError, ScopeError
 from .nativo import (Nativo, NativoError, NativoSinRespuesta, resumir_interferencias, resumir_operacion,
                      resumir_taladros)
+from .nativo import nombre_fichero as nombre_fichero_nat
 from .operaciones import (PlanError, huella, huella_aristas, leer_hol, nombre_operacion, planificar_chaflan,
                           planificar_patron, planificar_redondeo, planificar_taladro, resumir_aristas, resumir_caras, resumir_seleccion)
 from .tareas import GestorTareas
@@ -45,8 +49,16 @@ Servidor de SOLO LECTURA sobre Creo Parametric (IAC, Departamento de Ingeniería
 - `interferencias_creo` y `taladros_creo` leen de Creo de forma nativa (Creo Toolkit, programa
   creo_iac_tk.exe): interferencias del conjunto sin exportar STEP y operaciones de taladro con su
   rosca normalizada. Son de lectura; en conjuntos grandes tardan minutos.
+- `taladros_conjugados` comprueba en un conjunto que los taladros enfrentados de piezas distintas
+  están alineados (descentrado frente a la holgura del tornillo) y casan de tamaño (roscado M6 con
+  holgura M6). Útil antes de fabricar o al revisar un conjunto.
+- `holguras_creo` da las holguras mínimas entre piezas de un conjunto (distancia exacta de Creo)
+  y, con `temperatura`, una estimación en frío por contracción diferencial de los materiales
+  (tabla contraccion_iac.json). La estimación en frío depende del punto fijo: dilo siempre.
 - Las herramientas largas (exportar_step, exportar_bom_excel, presupuesto_masas,
-  revisar_estandares, interferencias_creo, taladros_creo, crear_taladros) responden «en_curso» con un
+  revisar_estandares, interferencias_creo, taladros_creo, taladros_conjugados, holguras_creo, crear_taladros)
+  responden
+  «en_curso» con un
   `tarea_id` si tardan más de ~55 s: recoge el resultado con `resultado_tarea`; no las repitas.
 - `exportar_bom_excel` escribe un Excel nuevo en la carpeta de exportación (no toca
   Creo). Si `aplicar_parametros_excel` está activa (CREO_MCP_ALLOW_PARAMETERS=1), solo
@@ -271,7 +283,7 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
     ) -> dict[str, Any]:
         """Recoge el resultado de una herramienta larga que respondió «en_curso» (exportar_step,
         exportar_bom_excel, presupuesto_masas, revisar_estandares, interferencias_creo,
-        taladros_creo, crear_taladros, crear_patron, crear_redondeos, crear_chaflanes). Si aún no ha terminado, espera hasta esperar_s y vuelve a dar el estado:
+        taladros_creo, taladros_conjugados, holguras_creo, crear_taladros, crear_patron, crear_redondeos, crear_chaflanes). Si aún no ha terminado, espera hasta esperar_s y vuelve a dar el estado:
         llámala otra vez. No repitas la herramienta original mientras siga en curso."""
         t = tareas.obtener(tarea_id)
         return tareas.entregar(t, min(esperar_s, tareas.espera_s))
@@ -1179,6 +1191,228 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
                 "operaciones": lim["items"], "operaciones_count": lim["count"], "truncated": lim["truncated"],
                 "carpeta": str(settings.export_dir) if fichero else None, "fichero": fichero,
                 "fuente": f"Creo Toolkit (creo_iac_tk {datos.get('version_tk')}), árbol de elementos de cada operación"}
+
+    @mcp.tool(annotations=EXPORT)
+    @guard
+    @tareas.larga
+    def taladros_conjugados(
+        conjunto: ModelArg = None,
+        separacion_max: Annotated[float, Field(
+            ge=0, le=50, description="Separación máxima a lo largo del eje entre los dos taladros (mm), p. ej. "
+                                     "el espesor de una arandela o un suplemento entre las piezas")] = 1.0,
+        nombre_fichero: Annotated[
+            str | None, Field(description="Nombre del .xlsx (sin ruta). Vacío = CONJUGADOS_<conjunto>_<aammddhhmm>.xlsx")
+        ] = None,
+        incluir_tornilleria: Annotated[bool, Field(
+            description="Incluir los tornillos (sus roscas cosméticas exteriores no son taladros)")] = False,
+    ) -> dict[str, Any]:
+        """Comprueba los taladros conjugados de un conjunto (Creo Toolkit, sin STEP): busca los
+        taladros de piezas distintas que están enfrentados (ejes casi coincidentes y tocándose) y
+        de cada pareja dice si están alineados (descentrado frente a la holgura que deja el
+        tornillo; ejes paralelos) y si casan de tamaño (roscado M6 con holgura M6, no M5; recto con
+        Ø mayor que la métrica; dos roscas enfrentadas; taladrado sin rosca). Cuenta además los
+        taladros sin pareja. Si hay carpeta de exportación, escribe un Excel. No modifica Creo.
+        Solo ve operaciones de taladro (no cortes por extrusión o revolución)."""
+        m = _modelo_nativo(conjunto)
+        if m and not m.upper().endswith(".ASM"):
+            raise ValueError(f"{m} no es un conjunto (.ASM): abre el conjunto o indica su nombre.")
+        datos_t = nat.ejecutar("taladros", m)
+        datos_p = nat.ejecutar("posiciones", m)
+        excluir = None if incluir_tornilleria else (lambda nombre: _tornilleria(nombre) is not None)
+        r = revisar_conjugados(datos_t, datos_p, separacion_max=separacion_max, excluir=excluir)
+        fichero = None
+        if settings.export_enabled:
+            fname, ruta = _nuevo_fichero("CONJUGADOS", r["conjunto"], nombre_fichero)
+            u = r["unidad_longitud"] or "?"
+            filas = [_cab("Estado", "Pieza A", "Taladro A", "Id A", "Pieza B", "Taladro B", "Id B",
+                          f"Descentrado ({u})", "Ángulo (°)", "Punto (conjunto)", "Nota")]
+            filas += [[x["estado"], x["a"]["pieza"], x["a"]["taladro"], x["a"]["id"], x["b"]["pieza"],
+                       x["b"]["taladro"], x["b"]["id"], (x["descentrado"], xlsx_mod.NUM3), x["angulo"],
+                       " ".join(f"{c:g}" for c in x["punto"]), x["nota"]] for x in r["pares"]]
+            sueltos = [_cab("Pieza", "Id", "Nombre", "Taladro", "Punto (conjunto)")]
+            sueltos += [[t["pieza"], t["id"], t["nombre"] or "", t["taladro"], " ".join(f"{c:g}" for c in t["punto"])]
+                        for t in r["sin_pareja"]]
+            resumen = [_cab("Dato", "Valor"), ["Conjunto", r["conjunto"]],
+                       ["Fecha", f"{datetime.now():%Y-%m-%d %H:%M}"],
+                       ["Herramienta", f"creo-mcp-iac {__version__} / creo_iac_tk {datos_t.get('version_tk')}"],
+                       ["Unidad de longitud", u], ["Separación máxima a lo largo del eje", separacion_max],
+                       ["Piezas con taladros (instancias)", r["piezas_con_taladros"]],
+                       ["Taladros revisados", r["taladros_revisados"]], ["Parejas", len(r["pares"])]]
+            resumen += [[f"  {k}", v] for k, v in r["por_estado"].items()]
+            resumen += [["Taladros sin pareja", len(r["sin_pareja"])], ["  roscados", r["roscados_sin_pareja"]]]
+            resumen += [[a] for a in r["avisos"]]
+            resumen += [[""], ["Borrador generado por el asistente: revisar cada pareja en Creo. No ve cortes "
+                               "por extrusión ni revolución."]]
+            xlsx_mod.escribir(ruta, [
+                {"nombre": "Resumen", "filas": resumen, "anchos": [40, 60]},
+                {"nombre": "Parejas", "filas": filas, "anchos": [10, 34, 30, 8, 34, 30, 8, 14, 10, 26, 70],
+                 "fijar_cabecera": True, "autofiltro": len(filas)},
+                {"nombre": "Sin pareja", "filas": sueltos, "anchos": [34, 8, 26, 30, 26],
+                 "fijar_cabecera": True, "autofiltro": len(sueltos)},
+            ])
+            fichero = fname
+        mostrar = [x for x in r["pares"] if x["estado"] != "correcto"][:60]
+        return {"conjunto": r["conjunto"], "unidad_longitud": r["unidad_longitud"],
+                "piezas_con_taladros": r["piezas_con_taladros"], "taladros_revisados": r["taladros_revisados"],
+                "parejas": len(r["pares"]), "por_estado": r["por_estado"],
+                "problemas": mostrar, "problemas_mostrados": len(mostrar),
+                "correctas_ejemplo": [x for x in r["pares"] if x["estado"] == "correcto"][:5],
+                "sin_pareja": len(r["sin_pareja"]), "roscados_sin_pareja": r["roscados_sin_pareja"],
+                **({"avisos": r["avisos"]} if r["avisos"] else {}),
+                "carpeta": str(settings.export_dir) if fichero else None, "fichero": fichero,
+                "fuente": f"Creo Toolkit (creo_iac_tk {datos_t.get('version_tk')}): taladros de cada pieza y "
+                          "posición de cada componente"}
+
+    @mcp.tool(annotations=EXPORT)
+    @guard
+    @tareas.larga
+    def holguras_creo(
+        conjunto: ModelArg = None,
+        umbral: Annotated[float, Field(gt=0, le=50, description="Se listan los pares de piezas a menos de esta "
+                                                                "distancia (mm)")] = 2.0,
+        holgura_minima: Annotated[float, Field(ge=0, le=50, description="Holgura mínima admisible (mm); por "
+                                                                       "debajo se marca 'insuficiente'")] = 0.5,
+        temperatura: Annotated[float | None, Field(
+            ge=1, le=293, description="Temperatura de operación (K) para estimar las holguras en frío. Vacío = "
+                                      "solo a temperatura ambiente")] = None,
+        temperaturas: Annotated[dict[str, float] | None, Field(
+            description="Temperatura (K) de piezas concretas, p. ej. {'PANTALLA.PRT': 80}; el resto, `temperatura`")] = None,
+        materiales: Annotated[dict[str, str] | None, Field(
+            description="Material de piezas concretas si en Creo no está o no se reconoce, p. ej. "
+                        "{'SOPORTE.PRT': 'Ti-6Al-4V'} (nombres de contraccion_iac.json)")] = None,
+        punto_fijo: Annotated[list[float] | None, Field(
+            min_length=3, max_length=3, description="Punto (coordenadas del conjunto, mm) alrededor del que se "
+                                                    "contrae todo: por dónde está sujeto. Vacío = origen del conjunto")] = None,
+        fijo_en_seleccion: Annotated[bool, Field(
+            description="Tomar el punto fijo de lo seleccionado en Creo (centro de la cara por la que se sujeta "
+                        "el conjunto)")] = False,
+        incluir_tornilleria: Annotated[bool, Field(description="Incluir tornillos, tuercas, arandelas y pasadores")] = False,
+        max_pares: Annotated[int, Field(ge=1, le=20000, description="Máximo de pares que se calculan en Creo "
+                                                                  "(los de cajas más cercanas)")] = 3000,
+        nombre_fichero: Annotated[
+            str | None, Field(description="Nombre del .xlsx (sin ruta). Vacío = HOLGURAS_<conjunto>_<aammddhhmm>.xlsx")
+        ] = None,
+    ) -> dict[str, Any]:
+        """Holguras mínimas entre las piezas de un conjunto (Creo Toolkit, distancia exacta entre
+        sólidos) y, si se da `temperatura`, su estimación en frío: cada pieza se contrae con la
+        contracción integrada de su material (desde 293 K, tabla del departamento) alrededor de
+        `punto_fijo`. Marca las holguras por debajo de `holgura_minima`, los contactos y las que
+        se cierran en frío. Primero filtra los pares por sus cajas; sin tornillería por defecto.
+        Excel opcional. No modifica Creo. Las interferencias las da interferencias_creo.
+        Los ajustes concéntricos (eje dentro de agujero: las dos caras más cercanas son cilindros
+        coaxiales) se calculan con la contracción de cada radio, sin depender del punto fijo. El
+        resto es una estimación de primer orden: con materiales distintos depende del punto fijo;
+        no considera gradientes ni que cambien los puntos más cercanos."""
+        m = _modelo_nativo(conjunto)
+        if m and not m.upper().endswith(".ASM"):
+            raise ValueError(f"{m} no es un conjunto (.ASM): abre el conjunto o indica su nombre.")
+        tabla = cargar_tabla()
+        for mod, nom in (materiales or {}).items():
+            if buscar_material(tabla, nom) is None:
+                raise ValueError(f"Material '{nom}' ({mod}) no está en la tabla. Disponibles: "
+                                 + ", ".join(x["nombre"] for x in tabla["materiales"]))
+        sel = nat.ejecutar("seleccion") if fijo_en_seleccion else None
+        pos = nat.ejecutar("posiciones", m)
+        lista = piezas(pos)
+        if lista and all(p["caja"] is None for p in lista):
+            raise ValueError("creo_iac_tk no devuelve las cajas de las piezas: hace falta la versión 0.6.0 o "
+                             "posterior (native\\compilar.cmd).")
+        conj = nombre_fichero_nat(pos["modelo"]["nombre"], pos["modelo"]["tipo"])
+        unidad = pos.get("unidad_longitud")
+        excluir = None if incluir_tornilleria else (lambda nombre: _tornilleria(nombre) is not None)
+        cand, total = candidatos(lista, umbral, excluir, max_pares)
+        if cand:
+            res = nat.ejecutar("holguras", m, pares=[[lista[i]["ruta"], lista[j]["ruta"]] for i, j, _ in cand])
+        else:
+            res = {"pares": [], "calculados": 0}
+        if sel is not None:
+            pf, pf_origen = punto_de_seleccion(sel, pos)
+        elif punto_fijo:
+            pf, pf_origen = tuple(punto_fijo), "indicado"
+        else:
+            pf, pf_origen = (0.0, 0.0, 0.0), "origen del conjunto (no se indicó por dónde se sujeta)"
+        rev = revisar_holguras(lista, cand, res, umbral, holgura_minima, temperatura, temperaturas, materiales,
+                               pf, tabla)
+        avisos = list(rev["avisos"])
+        if unidad and str(unidad).lower() not in ("mm", "millimeter", "millimetre", "milímetro"):
+            avisos.insert(0, f"El conjunto está en {unidad}: umbral, holguras y punto fijo van en esa unidad.")
+        if total > len(cand):
+            avisos.append(f"Hay {total} pares de cajas cercanas y solo se han calculado {len(cand)} (max_pares).")
+        mats: dict[str, Any] = {}
+        if temperatura is not None or temperaturas:
+            tmp = {k.upper(): v for k, v in (temperaturas or {}).items()}
+            mt = {k.upper(): v for k, v in (materiales or {}).items()}
+            for p in lista:
+                if p["modelo"] in mats:
+                    continue
+                nombre_mat = mt.get(p["modelo"]) or p.get("material")
+                fila = buscar_material(tabla, nombre_mat)
+                t = tmp.get(p["modelo"], temperatura)
+                mats[p["modelo"]] = {"material_creo": p.get("material"), "material_tabla": fila["nombre"] if fila else None,
+                                     "temperatura": t,
+                                     "contraccion": round(contraccion(fila, t), 6) if fila and t is not None else None}
+        filas = rev["filas"]
+        fichero = None
+        if settings.export_enabled:
+            fname, ruta = _nuevo_fichero("HOLGURAS", conj, nombre_fichero)
+            u = unidad or "?"
+            frio = temperatura is not None or bool(temperaturas)
+            cab = ["Estado", "Pieza A", "Pieza B", f"Holgura ({u})", "Punto A", "Punto B"]
+            if frio:
+                cab += ["Material A", "Material B", "T A (K)", "T B (K)", "ΔL/L A", "ΔL/L B",
+                        f"Holgura en frío ({u})", f"Cambio ({u})", "Estado en frío", "Cálculo en frío"]
+            hoja = [_cab(*cab)]
+            for f in filas:
+                fila = [f["estado"], f["a"], f["b"], (f["distancia"], xlsx_mod.NUM3),
+                        " ".join(f"{c:g}" for c in f["punto_a"]), " ".join(f"{c:g}" for c in f["punto_b"])]
+                if frio:
+                    fila += [f.get("material_a") or "", f.get("material_b") or "", f.get("temperatura_a"),
+                             f.get("temperatura_b"), f.get("contraccion_a"), f.get("contraccion_b"),
+                             (f["distancia_frio"], xlsx_mod.NUM3) if "distancia_frio" in f else "",
+                             (f["cambio"], xlsx_mod.NUM3) if "cambio" in f else "", f.get("estado_frio", ""),
+                             (f"concéntrico (R {f['radio_exterior']:g} / {f['radio_interior']:g})"
+                              if f.get("ajuste") == "concéntrico" else
+                              ("contracción alrededor del punto fijo" if "distancia_frio" in f else ""))]
+                hoja.append(fila)
+            resumen = [_cab("Dato", "Valor"), ["Conjunto", conj], ["Fecha", f"{datetime.now():%Y-%m-%d %H:%M}"],
+                       ["Herramienta", f"creo-mcp-iac {__version__} / creo_iac_tk {res.get('version_tk') or pos.get('version_tk')}"],
+                       ["Unidad de longitud", u], ["Umbral", umbral], ["Holgura mínima", holgura_minima],
+                       ["Tornillería", "incluida" if incluir_tornilleria else "excluida"],
+                       ["Pares calculados en Creo", rev["calculados"]], ["Pares listados", len(filas)]]
+            resumen += [[f"  {k}", v] for k, v in rev["por_estado"].items()]
+            if frio:
+                resumen += [["Temperatura (K)", temperatura],
+                            ["Punto fijo", " ".join(f"{c:.3f}" for c in pf) + f" ({pf_origen})"],
+                            ["Tabla de contracción", Path(tabla["_fichero"]).name]]
+                resumen += [[f"  en frío: {k}", v] for k, v in rev["por_estado_frio"].items()]
+            resumen += [[a] for a in avisos]
+            resumen += [[""], ["Borrador generado por el asistente. La holgura en frío es una estimación de primer "
+                               "orden (contracción alrededor del punto fijo); comprobar las críticas con un análisis."]]
+            hojas = [{"nombre": "Resumen", "filas": resumen, "anchos": [34, 70]},
+                     {"nombre": "Holguras", "filas": hoja, "fijar_cabecera": True, "autofiltro": len(hoja),
+                      "anchos": [16, 34, 34, 12, 26, 26] + ([22, 22, 8, 8, 11, 11, 14, 12, 20, 30] if frio else [])}]
+            if mats:
+                hm = [_cab("Pieza", "Material en Creo", "Material de la tabla", "T (K)", "ΔL/L")]
+                hm += [[k, v["material_creo"] or "", v["material_tabla"] or "SIN DATOS", v["temperatura"],
+                        v["contraccion"] if v["contraccion"] is not None else ""] for k, v in sorted(mats.items())]
+                hojas.append({"nombre": "Materiales", "filas": hm, "anchos": [36, 26, 32, 8, 12],
+                              "fijar_cabecera": True})
+            xlsx_mod.escribir(ruta, hojas)
+            fichero = fname
+        problemas = [f for f in filas if f["estado"] not in ("correcta", "contacto")
+                     or f.get("estado_frio") not in (None, "correcta", "no evaluada (contacto)")]
+        return {"conjunto": conj, "unidad_longitud": unidad, "umbral": umbral, "holgura_minima": holgura_minima,
+                "piezas": len(lista), "pares_candidatos": total, "pares_calculados": rev["calculados"],
+                "segundos_creo": rev["segundos"], "pares_listados": len(filas), "por_estado": rev["por_estado"],
+                **({"temperatura": temperatura, "punto_fijo": [round(c, 3) for c in pf], "punto_fijo_origen": pf_origen,
+                    "por_estado_frio": rev["por_estado_frio"],
+                    "materiales": mats} if mats else {}),
+                "problemas": problemas[:60], "problemas_mostrados": min(60, len(problemas)),
+                "problemas_total": len(problemas),
+                **({"avisos": avisos} if avisos else {}),
+                "carpeta": str(settings.export_dir) if fichero else None, "fichero": fichero,
+                "fuente": "Creo Toolkit (ProFitClearanceCompute) y tabla de contracción "
+                          f"{Path(tabla['_fichero']).name}"}
 
     # ------------------------------------------------------------------
     # Operaciones sencillas (taladros) con Creo Toolkit

@@ -11,7 +11,8 @@ operaciones `IA_*` en una pieza en sesión. **Nunca guarda modelos.**
 | `estado` | Versión de Creo y modelo activo | (prueba) |
 | `interferencias [--rapido]` | Análisis global de interferencias de Creo (`ProFitGlobalinterferenceCompute`): pares de piezas, ruta y volumen | `interferencias_creo` |
 | `taladros` | Operaciones de taladro y roscas cosméticas de la pieza o de todas las piezas del conjunto: árbol de elementos, serie de rosca, tamaño de tornillo y eje | `taladros_creo` |
-| `posiciones` | Componentes del conjunto con su ruta y su matriz 4×4 | (para montar tornillería) |
+| `posiciones` | Componentes del conjunto con su ruta y su matriz 4×4; en las piezas, material (`ProMaterialCurrentGet`) y caja (`ProSolidOutlineGet`, coordenadas de la pieza) desde 0.6.0 | `taladros_conjugados`, `holguras_creo` |
+| `holguras --pares F` | Distancia mínima entre pares de componentes (`ProFitClearanceCompute`) con los dos puntos más cercanos en coordenadas del conjunto; una línea por par, `ruta_a ruta_b` con ids separados por `/`. Si los puntos más cercanos están en caras cilíndricas, da su radio y su eje (`cilindro_a`, `cilindro_b`, desde 0.6.1) para los ajustes concéntricos. Se corta a los 540 s (`truncado`) | `holguras_creo` |
 | `caras` | Caras planas de la pieza (id, normal exterior, punto, área, caja), planos de referencia y cuerpo por defecto | `caras_creo`, `proponer_taladros` |
 | `seleccion` | Lo seleccionado en Creo: tipo, id, cara, coordenadas de un punto de referencia y punto pinchado | `seleccion_creo` |
 | `crear --plan F` | **Escribe.** Crea UNA operación a partir de un plan (árbol de elementos). Comprueba que el eje pasa por el punto pedido; si no, la borra y prueba los otros signos de las cotas. Con `patron <id>` crea un patrón de esa operación (`ProPatternCreate`) y comprueba cada miembro (`esperado x y z`), probando los sentidos (`alternar_i`) | `crear_taladros`, `crear_patron` |

@@ -187,7 +187,7 @@ def test_ordenes_permitidas_y_nombres(tmp_path):
         n.ejecutar("guardar")
     with pytest.raises(nativo.NativoError):
         n.ejecutar("taladros", "../X.PRT")
-    assert set(nativo.ORDENES) == {"estado", "interferencias", "taladros", "posiciones", "caras", "seleccion", "arbol", "aristas"}
+    assert set(nativo.ORDENES) == {"estado", "interferencias", "taladros", "posiciones", "caras", "seleccion", "arbol", "aristas", "holguras"}
     assert set(nativo.ESCRITURA) == {"crear", "borrar"}
     env = n.entorno()
     assert env["PATH"].startswith(str(tmp_path / "x86e_win64" / "lib"))
@@ -364,3 +364,16 @@ def test_espera_configurable():
     assert Settings.from_env({}).espera_s == 55
     with pytest.raises(ConfigError):
         Settings.from_env({"CREO_MCP_ESPERA": "90"})
+
+
+def test_holguras_pares_validados(tmp_path, monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("servicio_tk", Path(__file__).parents[1] / "native" / "servicio_tk.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.pares_validos([[[1], [9, 2]]]) and mod.texto_pares([[[1], [9, 2]]]) == "1 9/2\n"
+    assert not mod.pares_validos([[[1], [0]]]) and not mod.pares_validos([]) and not mod.pares_validos([[[1]]])
+    assert not mod.pares_validos([[["1; del"], [2]]])
+    n = nativo.Nativo(tmp_path / "x.exe", tmp_path, None, threading.Lock(), runner=Runner({}))
+    with pytest.raises(nativo.NativoError, match="Pares"):
+        n.ejecutar("holguras", "TOP.ASM", pares=[[[1], [True]]])

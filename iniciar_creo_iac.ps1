@@ -27,7 +27,7 @@ $McpDir      = "E:\PTC\creo-mcp-iac"
 $PuertoCreoson = 9056
 $PuertoServicio = 9057
 $EsperaCreoS = 180                                         # 3 min
-$ServicioEscritura = $false   # $true = el asistente puede crear taladros (ademas, CREO_MCP_ALLOW_OPERACIONES=1 en Claude)
+$ServicioEscritura = $true    # $true = el asistente puede crear taladros (ademas, CREO_MCP_ALLOW_OPERACIONES=1 en Claude)
 # --------------------------------------------------------------------------------
 
 $Tk   = Join-Path $McpDir "native\build\creo_iac_tk.exe"

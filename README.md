@@ -15,7 +15,7 @@ Asistente ──stdio──▶ creo-mcp-iac ──HTTP localhost──▶ CREOSO
   nativas, operaciones de taladro, caras, aristas y selección, y creación de taladros, patrones,
   redondeos y chaflanes.
 
-Versión 0.13.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nativo:
+Versión 0.16.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nativo:
 [`native/README.md`](native/README.md).
 
 ## Principios
@@ -52,6 +52,8 @@ Versión 0.13.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nati
 | `aristas_creo` | Aristas con sus caras, punto medio, dirección y si son cóncavas (esquina interior) o convexas | No |
 | `proponer_redondeos` / `crear_redondeos` | Redondeo de radio constante en las aristas elegidas (p. ej. esquinas interiores que la fresa no puede dejar vivas) | Redondeo `IA_RED_*`, sin guardar |
 | `proponer_chaflanes` / `crear_chaflanes` | Chaflán de distancia constante (45×D o D×D) en las aristas elegidas (romper aristas vivas, entradas de taladros y ejes) | Chaflán `IA_CHF_*`, sin guardar |
+| `taladros_conjugados` | Taladros enfrentados de piezas distintas en un conjunto: alineación frente a la holgura del tornillo y tamaños compatibles (roscado M6 con holgura M6) | Solo un fichero nuevo |
+| `holguras_creo` | Holguras mínimas entre piezas (distancia exacta de Creo) y estimación en frío por contracción de los materiales | Solo un fichero nuevo |
 | `borrar_operaciones_ia` | Deshace operaciones, patrones, redondeos y chaflanes `IA_*` | Borra `IA_*`, sin guardar |
 | `resultado_tarea`, `listar_tareas` | Recoger el resultado de herramientas largas | No |
 
@@ -87,6 +89,17 @@ releyendo la pieza que esas aristas han desaparecido.
 Los chaflanes siguen el mismo camino: `proponer_chaflanes` (distancia D, esquema 45×D —el
 habitual, «Ch D×45°»— o D×D; normalmente en aristas exteriores, avisa si alguna es interior) y
 `crear_chaflanes`.
+
+## Holguras y criogenia
+
+`holguras_creo` filtra los pares de piezas por sus cajas, pide a Creo la distancia mínima exacta
+(`ProFitClearanceCompute`) y marca contactos, interferencias y holguras por debajo de
+`holgura_minima`. Con `temperatura` (K) estima la holgura en frío: cada pieza se contrae con la
+contracción integrada de su material desde 293 K (`contraccion_iac.json`, editable; otra tabla
+con `CREO_MCP_CONTRACCION`) alrededor de un punto fijo, que puede ser el centro de la cara
+seleccionada en Creo (`fijo_en_seleccion`). Los ajustes concéntricos (eje dentro de agujero) se
+calculan con la contracción de cada radio, sin depender del punto fijo. Es una estimación de
+primer orden: no sustituye a un análisis termoelástico.
 
 ## Configuración
 

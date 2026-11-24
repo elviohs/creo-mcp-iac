@@ -12,7 +12,12 @@
      interferencias  Interferencias globales del conjunto (analisis nativo de Creo).
      taladros        Operaciones de taladro y roscas cosmeticas de la pieza o de
                      todas las piezas del conjunto (arbol de elementos + ejes).
-     posiciones      Componentes del conjunto con su ruta y su matriz de posicion.
+     posiciones      Componentes del conjunto con su ruta, su matriz de posicion y, en las
+                     piezas, su material y su caja (coordenadas de la pieza).
+     holguras --pares F
+                     Distancia minima (ProFitClearanceCompute) entre los pares de componentes
+                     del fichero F (una linea por par: "ruta_a ruta_b", rutas con ids separados
+                     por '/'), con los puntos mas cercanos en coordenadas del conjunto.
      caras           Caras planas y planos de referencia de una pieza (para colocar operaciones).
      seleccion       Lo que el usuario tiene seleccionado en Creo.
      aristas         Aristas de una pieza (caras vecinas, longitud, concava/convexa).
@@ -61,9 +66,11 @@
 #include "ProContour.h"
 #include "ProCrvcollection.h"
 #include "ProCollect.h"
+#include "ProMaterial.h"
+#include <time.h>
 #include "salida.h"
 
-#define VERSION_TK "0.5.1"
+#define VERSION_TK "0.6.1"
 #define MAX_MODELOS 20000
 
 static ProProcessHandle sesion;
@@ -557,6 +564,20 @@ static void accion_posicion(ProMdl hijo, ProAsmcomppath *ruta, void *dato)
     } else {
         j_null("matriz");
     }
+    if (t == PRO_MDL_PART) {
+        ProMaterial mat;
+        Pro3dPnt caja[2];
+        if (ProMaterialCurrentGet((ProSolid)hijo, &mat) == PRO_TK_NO_ERROR) j_wstr("material", mat.matl_name);
+        else j_null("material");
+        if (ProSolidOutlineGet((ProSolid)hijo, caja) == PRO_TK_NO_ERROR) {
+            j_abrir_lista("caja");
+            for (i = 0; i < 2; i++)
+                for (k = 0; k < 3; k++) j_num(NULL, caja[i][k]);
+            j_cerrar_lista();
+        } else {
+            j_null("caja");
+        }
+    }
     j_cerrar_obj();
 }
 
@@ -577,6 +598,155 @@ static int orden_posiciones(const char *modelo)
     j_abrir_lista("componentes");
     recorrer_conjunto(mdl, accion_posicion, NULL);
     j_cerrar_lista();
+    j_cerrar_obj();
+    j_fin();
+    return 0;
+}
+
+/* -------------------------------------------------------------- holguras */
+
+#define LIMITE_HOLGURAS_S 540.0
+
+static int leer_ruta(const char **p, int *ids, int *n)
+{
+    char *fin;
+    long v;
+    *n = 0;
+    while (**p == ' ') (*p)++;
+    for (;;) {
+        v = strtol(*p, &fin, 10);
+        if (fin == *p || v <= 0 || *n >= PRO_MAX_ASSEM_LEVEL) return 0;
+        ids[(*n)++] = (int)v;
+        *p = fin;
+        if (**p != '/') break;
+        (*p)++;
+    }
+    return *n > 0;
+}
+
+static ProError seleccion_comp(ProMdl raiz, int *ids, int n, ProSelection *sel, ProAsmcomppath *ruta,
+                               ProMdl *mdl)
+{
+    ProModelitem it;
+    ProError e = ProAsmcomppathInit((ProSolid)raiz, ids, n, ruta);
+    if (e == PRO_TK_NO_ERROR) e = ProAsmcomppathMdlGet(ruta, mdl);
+    if (e == PRO_TK_NO_ERROR) e = ProMdlToModelitem(*mdl, &it);
+    if (e == PRO_TK_NO_ERROR) e = ProSelectionAlloc(ruta, &it, sel);
+    return e;
+}
+
+/* Si el punto (coordenadas del conjunto) esta en una cara cilindrica de la pieza, escribe su
+   radio y su eje en coordenadas del conjunto (para los ajustes concentricos en frio). */
+static void cilindro_json(const char *clave, ProAsmcomppath *ruta, ProMdl mdl, const double *p)
+{
+    ProMatrix m;
+    Pro3dPnt local;
+    ProSurface srf;
+    ProUvParam uv;
+    ProSrftype tipo;
+    ProGeomitemdata *gd = NULL;
+    int j, k;
+    if (ProAsmcomppathTrfGet(ruta, PRO_B_TRUE, m) != PRO_TK_NO_ERROR) return;
+    for (k = 0; k < 3; k++) {                  /* inversa de una matriz de giro + traslacion */
+        local[k] = 0.0;
+        for (j = 0; j < 3; j++) local[k] += (p[j] - m[3][j]) * m[k][j];
+    }
+    if (ProSolidProjectPoint((ProSolid)mdl, local, 0.01, &srf, uv) != PRO_TK_NO_ERROR) return;
+    if (ProSurfaceTypeGet(srf, &tipo) != PRO_TK_NO_ERROR || tipo != PRO_SRF_CYL) return;
+    if (ProSurfaceDataGet(srf, &gd) != PRO_TK_NO_ERROR || gd == NULL || gd->data.p_surface_data == NULL) return;
+    {
+        ProCylinderdata *c = &gd->data.p_surface_data->srf_shape.cylinder;
+        double o[3], d[3];
+        for (k = 0; k < 3; k++) {
+            o[k] = m[3][k]; d[k] = 0.0;
+            for (j = 0; j < 3; j++) { o[k] += c->origin[j] * m[j][k]; d[k] += c->e3[j] * m[j][k]; }
+        }
+        j_clave_obj(clave);
+        j_num("radio", c->radius);
+        j_abrir_lista("eje");
+        for (k = 0; k < 3; k++) j_num(NULL, o[k]);
+        for (k = 0; k < 3; k++) j_num(NULL, d[k]);
+        j_cerrar_lista();
+        j_cerrar_obj();
+    }
+    ProGeomitemdataFree(&gd);
+}
+
+static int orden_holguras(const char *modelo, const char *fichero)
+{
+    ProMdl mdl;
+    ProMdlType tipo;
+    FILE *f;
+    char linea[600];
+    int n = 0, fallidos = 0, truncado = 0, i;
+    time_t t0 = time(NULL);
+
+    if (!modelo_objetivo(modelo, &mdl)) return 4;
+    ProMdlTypeGet(mdl, &tipo);
+    if (tipo != PRO_MDL_ASSEMBLY) {
+        error_json("modelo", 0, "El modelo no es un conjunto");
+        return 4;
+    }
+    if (fichero == NULL || (f = fopen(fichero, "r")) == NULL) {
+        error_json("argumentos", -1, "Falta el fichero de pares (--pares)");
+        return 2;
+    }
+    cabecera_ok();
+    modelo_json("modelo", mdl);
+    unidad_longitud_json(mdl);
+    j_abrir_lista("pares");
+    while (fgets(linea, sizeof(linea), f) != NULL) {
+        int ida[PRO_MAX_ASSEM_LEVEL], idb[PRO_MAX_ASSEM_LEVEL], na = 0, nb = 0;
+        const char *p = linea;
+        ProSelection sa = NULL, sb = NULL;
+        double dist = 0.0, proy = 0.0;
+        ProBoolean interf = PRO_B_FALSE;
+        Pro3dPnt pts[2];
+        ProAsmcomppath rutaa, rutab;
+        ProMdl mdla = NULL, mdlb = NULL;
+        ProError e;
+        if (!leer_ruta(&p, ida, &na) || !leer_ruta(&p, idb, &nb)) continue;
+        if (difftime(time(NULL), t0) > LIMITE_HOLGURAS_S) { truncado = 1; break; }
+        e = seleccion_comp(mdl, ida, na, &sa, &rutaa, &mdla);
+        if (e == PRO_TK_NO_ERROR) e = seleccion_comp(mdl, idb, nb, &sb, &rutab, &mdlb);
+        if (e == PRO_TK_NO_ERROR) {
+            e = ProFitClearanceCompute(sa, PRO_FIT_INCLUDE_NONE, sb, PRO_FIT_INCLUDE_NONE, PRO_FIT_WHOLE_SURFACE,
+                                       NULL, PRO_B_FALSE, &dist, &proy, &interf, pts);
+            if (e == PRO_TK_BAD_INPUTS)   /* por si no admite referencia de proyeccion nula */
+                e = ProFitClearanceCompute(sa, PRO_FIT_INCLUDE_NONE, sb, PRO_FIT_INCLUDE_NONE,
+                                           PRO_FIT_WHOLE_SURFACE, sa, PRO_B_FALSE, &dist, &proy, &interf, pts);
+        }
+        j_abrir_obj();
+        j_int("n", n);
+        if (e == PRO_TK_NO_ERROR) {
+            j_num("distancia", dist);
+            j_bool("interferencia", interf == PRO_B_TRUE);
+            j_abrir_lista("puntos");
+            for (i = 0; i < 2; i++) {
+                j_abrir_lista(NULL);
+                j_num(NULL, pts[i][0]); j_num(NULL, pts[i][1]); j_num(NULL, pts[i][2]);
+                j_cerrar_lista();
+            }
+            j_cerrar_lista();
+            if (interf != PRO_B_TRUE && dist > 1e-6) {
+                cilindro_json("cilindro_a", &rutaa, mdla, pts[0]);
+                cilindro_json("cilindro_b", &rutab, mdlb, pts[1]);
+            }
+        } else {
+            j_int("error", (long)e);
+            fallidos++;
+        }
+        j_cerrar_obj();
+        if (sa) ProSelectionFree(&sa);
+        if (sb) ProSelectionFree(&sb);
+        n++;
+    }
+    fclose(f);
+    j_cerrar_lista();
+    j_int("calculados", n);
+    j_int("fallidos", fallidos);
+    j_bool("truncado", truncado);
+    j_num("segundos", difftime(time(NULL), t0));
     j_cerrar_obj();
     j_fin();
     return 0;
@@ -1565,10 +1735,10 @@ static int orden_borrar(const char *modelo, const char *ids_txt)
 
 int main(int argc, char *argv[])
 {
-    const char *modelo = NULL, *plan = NULL, *ids = NULL;
+    const char *modelo = NULL, *plan = NULL, *ids = NULL, *pares = NULL;
     int rapido = 0, i, rc;
     static const char *ordenes[] = {"estado", "interferencias", "taladros", "posiciones", "caras",
-                                    "seleccion", "crear", "borrar", "arbol", "aristas", NULL};
+                                    "seleccion", "crear", "borrar", "arbol", "aristas", "holguras", NULL};
     int valida = 0;
 
     orden_actual = argc > 1 ? argv[1] : "";
@@ -1576,12 +1746,13 @@ int main(int argc, char *argv[])
         if (strcmp(argv[i], "--modelo") == 0 && i + 1 < argc) modelo = argv[++i];
         else if (strcmp(argv[i], "--plan") == 0 && i + 1 < argc) plan = argv[++i];
         else if (strcmp(argv[i], "--ids") == 0 && i + 1 < argc) ids = argv[++i];
+        else if (strcmp(argv[i], "--pares") == 0 && i + 1 < argc) pares = argv[++i];
         else if (strcmp(argv[i], "--rapido") == 0) rapido = 1;
     }
     for (i = 0; ordenes[i]; i++) if (!strcmp(orden_actual, ordenes[i])) valida = 1;
     if (!valida) {
         error_json("argumentos", -1, "Orden desconocida. Ordenes: estado, interferencias, taladros, posiciones, "
-                   "caras, seleccion, crear, borrar, arbol, aristas");
+                   "caras, seleccion, crear, borrar, arbol, aristas, holguras");
         return 2;
     }
     if (!conectar()) return 3;
@@ -1595,6 +1766,7 @@ int main(int argc, char *argv[])
     else if (!strcmp(orden_actual, "crear")) rc = orden_crear(plan);
     else if (!strcmp(orden_actual, "arbol")) rc = orden_arbol(modelo, ids);
     else if (!strcmp(orden_actual, "aristas")) rc = orden_aristas(modelo);
+    else if (!strcmp(orden_actual, "holguras")) rc = orden_holguras(modelo, pares);
     else rc = orden_borrar(modelo, ids);
 
     ProEngineerDisconnect(&sesion, 10);
