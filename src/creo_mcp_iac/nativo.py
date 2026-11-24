@@ -38,6 +38,7 @@ ORDENES: dict[str, float] = {
     "caras": 60,
     "seleccion": 30,
     "arbol": 60,
+    "aristas": 60,
 }
 # Escritura en Creo (nunca guarda). Solo con CREO_MCP_ALLOW_OPERACIONES=1 en el servidor y
 # el servicio arrancado con --escritura.

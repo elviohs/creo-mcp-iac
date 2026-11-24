@@ -12,9 +12,10 @@ Asistente ──stdio──▶ creo-mcp-iac ──HTTP localhost──▶ CREOSO
 
 - **CREOSON** (creopyson): lectura de modelos, planos, BOM y masas; exportación STEP/PDF.
 - **Programa propio en C con Creo Toolkit** (`native/`): lo que CREOSON no hace — interferencias
-  nativas, operaciones de taladro, caras y selección, y creación de taladros y patrones.
+  nativas, operaciones de taladro, caras, aristas y selección, y creación de taladros, patrones y
+  redondeos.
 
-Versión 0.11.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nativo:
+Versión 0.12.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nativo:
 [`native/README.md`](native/README.md).
 
 ## Principios
@@ -48,7 +49,9 @@ Versión 0.11.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nati
 | `caras_creo`, `seleccion_creo`, `operaciones_creo` | Caras planas y referencias; lo seleccionado en Creo; operaciones y patrones | No |
 | `proponer_taladros` / `crear_taladros` | Taladros rectos y normalizados ISO (roscado, holgura, taladrado), con cajeado o avellanado | Operaciones `IA_*`, sin guardar |
 | `proponer_patron` / `crear_patron` | Patrones lineales (1 o 2 direcciones) o circulares de un taladro | Patrón `IA_PAT_*`, sin guardar |
-| `borrar_operaciones_ia` | Deshace operaciones y patrones `IA_*` | Borra `IA_*`, sin guardar |
+| `aristas_creo` | Aristas con sus caras, punto medio, dirección y si son cóncavas (esquina interior) o convexas | No |
+| `proponer_redondeos` / `crear_redondeos` | Redondeo de radio constante en las aristas elegidas (p. ej. esquinas interiores que la fresa no puede dejar vivas) | Redondeo `IA_RED_*`, sin guardar |
+| `borrar_operaciones_ia` | Deshace operaciones, patrones y redondeos `IA_*` | Borra `IA_*`, sin guardar |
 | `resultado_tarea`, `listar_tareas` | Recoger el resultado de herramientas largas | No |
 
 Las herramientas largas (exportaciones, BOM, masas, estándares, interferencias, taladros) responden
@@ -69,6 +72,16 @@ Las herramientas largas (exportaciones, BOM, masas, estándares, interferencias,
 
 Límites: piezas en mm, caras planas, colocación lineal, serie ISO. No es IFX: no taladra el resto
 del conjunto ni coloca tornillería.
+
+## Redondeos para fabricar
+
+Solo se redondea donde lo pide la fabricación. `aristas_creo` marca cada arista como cóncava
+(esquina interior) o convexa; las cóncavas paralelas al eje de la fresa (filtro `direccion`) son las
+que la fresa no puede dejar vivas. El fondo de una cajera no necesita radio con fresa plana. Las
+esquinas que señale una revisión de fabricabilidad se localizan por su punto medio.
+`proponer_redondeos` prepara la tabla con las aristas elegidas y el radio (mayor que el de la
+fresa; lo decide el usuario) y `crear_redondeos` lo crea tras la confirmación, comprobando
+releyendo la pieza que esas aristas han desaparecido.
 
 ## Configuración
 
@@ -111,7 +124,7 @@ pip install -e ".[test]"
 pytest -q
 ```
 
-166 pruebas sin Creo: CREOSON simulado (`tests/fake_creoson.py`) y el programa nativo simulado. Comprueban,
+169 pruebas sin Creo: CREOSON simulado (`tests/fake_creoson.py`) y el programa nativo simulado. Comprueban,
 entre otras cosas, que ninguna sesión de lectura envía escrituras, que las funciones peligrosas se
 bloquean, que la exportación nunca sobrescribe y que sin los permisos no se puede escribir en Creo.
 

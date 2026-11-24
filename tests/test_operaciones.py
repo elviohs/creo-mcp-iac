@@ -182,6 +182,10 @@ class CreoSimulado:
             r = self.crear.pop(0) if self.crear else None
             if isinstance(r, BaseException):
                 raise r
+            if r is None and "e 386.387 i 913" in plan:
+                self.aristas_creadas = True
+                r = {"ok": True, "modelo": {"nombre": "PRUEBA_CMD", "tipo": "PRT"},
+                     "operacion": {"id": 1600, "nombre": "IA_RED", "intentos": 1}, "guardado": False}
             if r is None and "\npatron " in plan:
                 nombre = next(x for x in plan.splitlines() if x.startswith("e 604.1964 w ")).split()[-1]
                 r = {"ok": True, "modelo": {"nombre": "PRUEBA_CMD", "tipo": "PRT"},
@@ -192,6 +196,10 @@ class CreoSimulado:
                 r = {"ok": True, "modelo": {"nombre": "PRUEBA_CMD", "tipo": "PRT"},
                      "operacion": {"id": 1200 + len(self.planes), "nombre": nombre, "intentos": 1, "signos": [1, 1],
                                    "desviacion": 0.0}, "guardado": False}
+        elif orden == "aristas":
+            r = ARISTAS
+            if getattr(self, "aristas_creadas", False) and not getattr(self, "redondeo_falla", False):
+                r = {**ARISTAS, "aristas": [a for a in ARISTAS["aristas"] if a["id"] not in (2001, 2002)]}
         elif orden == "taladros":
             r = {"ok": True, "modelo": {"nombre": "PRUEBA_CMD", "tipo": "PRT"}, "unidad_longitud": "mm", "modelos": [
                 {"nombre": "PRUEBA_CMD", "tipo": "PRT", "instancias": 1, "operaciones": [
@@ -312,7 +320,7 @@ async def test_sin_escritura_solo_propone(tmp_path, fake):
     srv = servidor(tmp_path, fake, creo, escritura=False)
     nombres = {t.name for t in srv._tool_manager.list_tools()}
     assert {"caras_creo", "seleccion_creo", "proponer_taladros"} <= nombres
-    assert not {"crear_taladros", "borrar_operaciones_ia", "crear_patron"} & nombres
+    assert not {"crear_taladros", "borrar_operaciones_ia", "crear_patron", "crear_redondeos"} & nombres
     err, p = await call(srv, "proponer_taladros", taladros=TALADROS[:1])
     assert not err and p["crear_activo"] is False and "desactivada" in p["siguiente"]
     err, msg = await call(srv, "caras_creo", modelo="TOP.ASM")
@@ -471,3 +479,60 @@ async def test_proponer_y_crear_patron(tmp_path, fake):
     err, msg = await call(srv, "proponer_patron", guia=1323, tipo="lineal", direccion1="+X", separacion1=15,
                           cantidad1=3, direccion2="+Z", separacion2=45, cantidad2=2)
     assert err and "fuera de la pieza" in msg
+
+
+# --------------------------------------------------------------- redondeos
+
+ARISTAS = {"ok": True, "modelo": {"nombre": "PRUEBA_CMD", "tipo": "PRT"}, "unidad_longitud": "mm", "total": 3,
+           "aristas": [
+               {"id": 2001, "tipo": "recta", "longitud": 8, "inicio": [10, 12, 10], "fin": [10, 20, 10],
+                "medio": [10, 16, 10], "tangente": [0, 1, 0], "caras": [3001, 3002], "forma": "concava"},
+               {"id": 2002, "tipo": "recta", "longitud": 120, "inicio": [-60, 20, 40], "fin": [60, 20, 40],
+                "medio": [0, 20, 40], "tangente": [1, 0, 0], "caras": [962, 971], "forma": "convexa"},
+               {"id": 2003, "tipo": "arco", "longitud": 20.7, "medio": [15, 20, 28.3], "caras": [962, 4000],
+                "forma": "tangente"}]}
+
+
+def test_resumen_y_plan_de_redondeo():
+    r = ops.resumir_aristas(ARISTAS, forma="concava")
+    assert [a["id"] for a in r["aristas"]] == [2001] and r["aristas"][0]["direccion"] == "Y"
+    assert [a["id"] for a in ops.resumir_aristas(ARISTAS, forma="concava", direccion="Y")["aristas"]] == [2001]
+    assert ops.resumir_aristas(ARISTAS, forma="concava", direccion="X")["aristas"] == []
+    pl = ops.planificar_redondeo({"aristas": [2001], "radio": 3}, ARISTAS, "IA_RED_R3_1")
+    p = pl["plan"].splitlines()
+    assert "e 386.387 i 913" in p and "e 386.2101.2102.2121.2124 k 2001" in p
+    assert "e 386.2101.2102.2123.2122.2106.2109 d 3.0000" in p and not any(x.startswith("sin_aristas") for x in p)
+    assert ops.plan_valido(pl["plan"])
+    assert ops.planificar_redondeo({"aristas": [2001], "radio": 10}, ARISTAS, "X")["avisos"]
+    for pet, txt in [({"aristas": [9], "radio": 2}, "no existe"), ({"aristas": [2003], "radio": 2}, "tangentes"),
+                     ({"aristas": [2001], "radio": 0}, "radio")]:
+        with pytest.raises(ops.PlanError, match=txt):
+            ops.planificar_redondeo(pet, ARISTAS, "X")
+
+
+@pytest.mark.anyio
+async def test_proponer_y_crear_redondeo(tmp_path, fake):
+    fake.files = ["PRUEBA_CMD.PRT"]
+    fake.active = "PRUEBA_CMD.PRT"
+    creo = CreoSimulado()
+    srv = servidor(tmp_path, fake, creo)
+    err, a = await call(srv, "aristas_creo", forma="concava")
+    assert not err and a["aristas"][0]["id"] == 2001
+    err, p = await call(srv, "proponer_redondeos", aristas=[2001, 2002], radio=2)
+    assert not err, p
+    assert p["codigo"].startswith("R") and p["formas"] == ["concava", "convexa"] and p["nombre"].startswith("IA_RED_R2_")
+    err, r = await call(srv, "crear_redondeos", codigo=p["codigo"])
+    assert not err and r["estado"] == "ok" and r["redondeo"]["id"] == 1600
+    assert "k 2001 2002" in creo.planes[0] and ops.plan_valido(creo.planes[0]) and r["aristas_comprobadas"]
+    # si las aristas siguen, se borra el redondeo
+    creo.redondeo_falla = True
+    creo.aristas_creadas = False
+    err, p = await call(srv, "proponer_redondeos", aristas=[2001], radio=2)
+    err, msg = await call(srv, "crear_redondeos", codigo=p["codigo"])
+    assert err and "siguen en la pieza" in msg and "se ha borrado" in msg
+    assert creo.llamadas[-1][1] == "borrar"
+
+
+def test_forma_invertida_en_tk_050():
+    viejo = {**ARISTAS, "version_tk": "0.5.0"}
+    assert [a["id"] for a in ops.resumir_aristas(viejo, forma="concava")["aristas"]] == [2002]

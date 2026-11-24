@@ -28,10 +28,10 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 PUERTO = 9057
 ORDENES = {"estado": 30, "interferencias": 900, "taladros": 600, "posiciones": 300, "caras": 60, "seleccion": 30,
-           "arbol": 60}
+           "arbol": 60, "aristas": 60}
 # Escritura en Creo (nunca guarda): solo si el servicio se arranca con --escritura.
 ESCRITURA = {"crear": 120, "borrar": 60}
 PERMITE_ESCRITURA = "--escritura" in sys.argv
@@ -51,9 +51,9 @@ def entorno() -> dict[str, str]:
 
 
 PLAN_RE = re.compile(r"^(modelo [A-Za-z0-9_\-]{1,80}\.PRT|serie [A-Za-z0-9_]{1,30}|tamano [A-Za-z0-9_.]{1,30}|"
-                     r"e [0-9.]{3,150} (i -?\d+|d -?\d+(\.\d+)?|b [01]|r \d+ -?\d+|w [A-Z0-9_]{1,31}|c)|"
+                     r"e [0-9.]{3,150} (i -?\d+|d -?\d+(\.\d+)?|b [01]|r \d+ -?\d+|w [A-Z0-9_]{1,31}|c|k( \d+){1,64})|"
                      r"verificar( -?\d+(\.\d+)?){6}|alternar(_i)? [0-9.]+ [0-9.]+|patron \d+|"
-                     r"esperado( -?\d+(\.\d+)?){3})$")
+                     r"esperado( -?\d+(\.\d+)?){3}|sin_aristas( \d+){1,64})$")
 
 
 def plan_valido(texto) -> bool:

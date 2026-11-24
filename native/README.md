@@ -15,6 +15,7 @@ operaciones `IA_*` en una pieza en sesión. **Nunca guarda modelos.**
 | `caras` | Caras planas de la pieza (id, normal exterior, punto, área, caja), planos de referencia y cuerpo por defecto | `caras_creo`, `proponer_taladros` |
 | `seleccion` | Lo seleccionado en Creo: tipo, id, cara, coordenadas de un punto de referencia y punto pinchado | `seleccion_creo` |
 | `crear --plan F` | **Escribe.** Crea UNA operación a partir de un plan (árbol de elementos). Comprueba que el eje pasa por el punto pedido; si no, la borra y prueba los otros signos de las cotas. Con `patron <id>` crea un patrón de esa operación (`ProPatternCreate`) y comprueba cada miembro (`esperado x y z`), probando los sentidos (`alternar_i`) | `crear_taladros`, `crear_patron` |
+| `aristas` | Aristas de la pieza: id, recta/arco, longitud, extremos, punto medio, tangente, caras vecinas y forma (cóncava, convexa o tangente) | `aristas_creo`, `proponer_redondeos` |
 | `arbol [--ids L]` | Operaciones de la pieza (id, nombre, tipo, estado, patrón) o el árbol de elementos de las indicadas y de su patrón | `operaciones_creo` |
 | `borrar --ids 12,15` | **Escribe.** Borra operaciones cuyo nombre empieza por `IA_` y sin hijas ajenas; los patrones `IA_PAT_*` con `ProPatternDelete` (queda la guía) | `borrar_operaciones_ia` |
 
@@ -92,7 +93,8 @@ verificar 10 20 5 0 1 0          # punto y dirección que debe tener el eje
 alternar 386.1340.706 386.1340.708   # cotas cuyo signo se prueba si el eje no cae en su sitio
 ```
 
-Tipos de valor: `i` entero, `d` real, `b` booleano, `w` texto, `r` referencia. Las plantillas
+Tipos de valor: `i` entero, `d` real, `b` booleano, `w` texto, `r` referencia, `k` colección de
+aristas (`k 1037 1038 …`, para redondeos). Las plantillas
 salen de taladros hechos a mano en Creo 12.4.1.0 (PRUEBA_CMD.PRT, 2026-11-23).
 
 ## Notas

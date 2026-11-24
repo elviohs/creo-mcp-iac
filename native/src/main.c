@@ -15,6 +15,7 @@
      posiciones      Componentes del conjunto con su ruta y su matriz de posicion.
      caras           Caras planas y planos de referencia de una pieza (para colocar operaciones).
      seleccion       Lo que el usuario tiene seleccionado en Creo.
+     aristas         Aristas de una pieza (caras vecinas, longitud, concava/convexa).
      arbol [--ids L] Operaciones de la pieza (id, nombre, tipo, estado, patron) o, con --ids,
                      su arbol de elementos y el de su patron.
    Escritura (solo si el servicio la permite; nunca guarda):
@@ -56,9 +57,13 @@
 #include "ProSolidBody.h"
 #include "ProPoint.h"
 #include "ProPattern.h"
+#include "ProEdge.h"
+#include "ProContour.h"
+#include "ProCrvcollection.h"
+#include "ProCollect.h"
 #include "salida.h"
 
-#define VERSION_TK "0.4.1"
+#define VERSION_TK "0.5.1"
 #define MAX_MODELOS 20000
 
 static ProProcessHandle sesion;
@@ -794,6 +799,118 @@ static int orden_seleccion(void)
     return 0;
 }
 
+/* ---------------------------------------------------------------- aristas */
+/* Aristas de la pieza con sus dos caras, longitud, extremos y si son concavas (esquina
+   interior, p. ej. la de una cajera) o convexas. Solo lectura. */
+
+typedef struct { ProSolid sld; int *vistas; int n, cap; ProSurface cara; } VisAristas;
+
+static void normal_en(ProSolid sld, ProSurface s, const double *p, double *n)
+{
+    ProUvParam uv;
+    ProVector xyz, d1[2], d2[3], nn;
+    int k;
+    for (k = 0; k < 3; k++) n[k] = 0;
+    if (ProSurfaceParamEval(sld, s, (double *)p, uv) == PRO_TK_NO_ERROR &&
+        ProSurfaceXyzdataEval(s, uv, xyz, d1, d2, nn) == PRO_TK_NO_ERROR)
+        for (k = 0; k < 3; k++) n[k] = nn[k];
+}
+
+static ProError visita_arista(ProEdge ed, ProError st, ProAppData d)
+{
+    VisAristas *va = (VisAristas *)d;
+    int id = -1, k, dir1 = 1, id1 = -1, id2 = -1;
+    ProEnttype tipo = PRO_ENT_NONE;
+    ProEdge e1, e2;
+    ProSurface s1 = NULL, s2 = NULL;
+    double lon = 0, n1[3], n2[3], t1[3], in1[3], nt, punto;
+    ProVector a, b, m, der1, der2, dirv;
+    ProEdgeIdGet(ed, &id);
+    for (k = 0; k < va->n; k++) if (va->vistas[k] == id) return PRO_TK_NO_ERROR;
+    if (va->n == va->cap) {
+        int *nv = (int *)realloc(va->vistas, sizeof(int) * (va->cap * 2 + 64));
+        if (!nv) return PRO_TK_NO_ERROR;
+        va->vistas = nv; va->cap = va->cap * 2 + 64;
+    }
+    va->vistas[va->n++] = id;
+    ProEdgeTypeGet(ed, &tipo);
+    ProEdgeLengthEval(ed, &lon);
+    ProEdgeXyzdataEval(ed, 0.0, a, der1, der2, dirv);
+    ProEdgeXyzdataEval(ed, 1.0, b, der1, der2, dirv);
+    ProEdgeXyzdataEval(ed, 0.5, m, der1, der2, dirv);
+    j_abrir_obj();
+    j_int("id", id);
+    j_str("tipo", tipo == PRO_ENT_LINE ? "recta" : tipo == PRO_ENT_ARC ? "arco" : "otra");
+    j_num("longitud", lon);
+    vec_json("inicio", a);
+    vec_json("fin", b);
+    vec_json("medio", m);
+    nt = sqrt(der1[0] * der1[0] + der1[1] * der1[1] + der1[2] * der1[2]);
+    if (nt > 1e-12) { double tu[3]; for (k = 0; k < 3; k++) tu[k] = der1[k] / nt; vec_json("tangente", tu); }
+    if (ProEdgeNeighborsGet(ed, &e1, &e2, &s1, &s2) == PRO_TK_NO_ERROR && s1 && s2) {
+        ProSurfaceIdGet(s1, &id1);
+        ProSurfaceIdGet(s2, &id2);
+        j_abrir_lista("caras"); j_int(NULL, id1); j_int(NULL, id2); j_cerrar_lista();
+        normal_en(va->sld, s1, m, n1);
+        normal_en(va->sld, s2, m, n2);
+        ProEdgeDirGet(ed, s1, &dir1);
+        if (nt > 1e-12) {
+            for (k = 0; k < 3; k++) t1[k] = dir1 * der1[k] / nt;
+            /* n1 x t1 apunta hacia FUERA de la cara 1 con el sentido que da ProEdgeDirGet
+               (comprobado en Creo 12.4 el 2026-11-24: aristas exteriores de un bloque y
+               esquinas interiores de un corte) */
+            in1[0] = n1[1] * t1[2] - n1[2] * t1[1];
+            in1[1] = n1[2] * t1[0] - n1[0] * t1[2];
+            in1[2] = n1[0] * t1[1] - n1[1] * t1[0];
+            punto = n2[0] * in1[0] + n2[1] * in1[1] + n2[2] * in1[2];
+            j_num("cos_normales", n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2]);
+            if (fabs(n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2]) > 0.9999) j_str("forma", "tangente");
+            else j_str("forma", punto < 0 ? "concava" : "convexa");
+            j_int("sentido_cara1", dir1);
+        }
+    }
+    j_cerrar_obj();
+    return PRO_TK_NO_ERROR;
+}
+
+static ProError visita_contorno_ar(ProContour c, ProError st, ProAppData d)
+{
+    VisAristas *va = (VisAristas *)d;
+    ProContourEdgeVisit(va->cara, c, visita_arista, NULL, d);
+    return PRO_TK_NO_ERROR;
+}
+
+static ProError visita_cara_ar(ProSurface s, ProError st, ProAppData d)
+{
+    VisAristas *va = (VisAristas *)d;
+    va->cara = s;
+    ProSurfaceContourVisit(s, visita_contorno_ar, NULL, d);
+    return PRO_TK_NO_ERROR;
+}
+
+static int orden_aristas(const char *modelo)
+{
+    ProMdl mdl;
+    ProMdlType tipo;
+    VisAristas va;
+    if (!modelo_objetivo(modelo, &mdl)) return 4;
+    ProMdlTypeGet(mdl, &tipo);
+    if (tipo != PRO_MDL_PART) { error_json("modelo", 0, "El modelo no es una pieza"); return 4; }
+    memset(&va, 0, sizeof(va));
+    va.sld = (ProSolid)mdl;
+    cabecera_ok();
+    modelo_json("modelo", mdl);
+    unidad_longitud_json(mdl);
+    j_abrir_lista("aristas");
+    ProSolidSurfaceVisit((ProSolid)mdl, visita_cara_ar, NULL, &va);
+    j_cerrar_lista();
+    j_int("total", va.n);
+    j_cerrar_obj();
+    j_fin();
+    free(va.vistas);
+    return 0;
+}
+
 /* ------------------------------------------------------------------ arbol */
 /* Lista las operaciones de una pieza (id, nombre, tipo, estado, patron) o vuelca el arbol de
    elementos de las indicadas (y el del patron si son guia de uno). Solo lectura. */
@@ -1115,6 +1232,7 @@ static int orden_crear(const char *fichero)
     char alt1[160] = "", alt2[160] = "", ai1[160] = "", ai2[160] = "";
     double objetivo[3] = {0, 0, 0}, direccion[3] = {0, 0, 0};
     int verificar = 0, id_patron = 0;
+    int sin_aristas[64], n_sin_aristas = 0;
     ProElement raiz = NULL;
     ProMdl mdl;
     int lineas_mal = 0;
@@ -1133,6 +1251,12 @@ static int orden_crear(const char *fichero)
         if (!strcmp(clave, "tamano")) { sscanf(t, "%*s %63s", tamano); continue; }
         if (!strcmp(clave, "alternar")) { sscanf(t, "%*s %159s %159s", alt1, alt2); continue; }
         if (!strcmp(clave, "alternar_i")) { sscanf(t, "%*s %159s %159s", ai1, ai2); continue; }
+        if (!strcmp(clave, "sin_aristas")) {
+            const char *q = t + 11;
+            int aid, usados = 0;
+            while (n_sin_aristas < 64 && sscanf(q, "%d%n", &aid, &usados) == 1) { sin_aristas[n_sin_aristas++] = aid; q += usados; }
+            continue;
+        }
         if (!strcmp(clave, "patron")) { if (sscanf(t, "%*s %d", &id_patron) != 1) lineas_mal++; continue; }
         if (!strcmp(clave, "esperado")) {
             if (n_esperados >= MAX_ESPERADOS ||
@@ -1177,6 +1301,38 @@ static int orden_crear(const char *fichero)
                     return 2;
                 }
                 ProSelectionFree(&sel);
+            } else if (tipo[0] == 'k') {
+                /* coleccion de aristas: e <ruta> k id1 id2 ... (redondeos) */
+                ProCollection col = NULL;
+                const char *q = strstr(t, " k ");
+                int n_ar = 0;
+                if (!q) { lineas_mal++; continue; }
+                if (!modelo_objetivo(modelo, &mdl)) { fclose(f); return 4; }
+                if (ProCrvcollectionAlloc(&col) != PRO_TK_NO_ERROR) { lineas_mal++; continue; }
+                q += 3;
+                while (*q) {
+                    int aid, usados = 0;
+                    ProModelitem it;
+                    ProSelection sel = NULL;
+                    ProReference ref = NULL;
+                    ProCrvcollinstr ins = NULL;
+                    if (sscanf(q, "%d%n", &aid, &usados) != 1) break;
+                    q += usados;
+                    while (*q == ' ') q++;
+                    if (ProModelitemInit(mdl, aid, PRO_EDGE, &it) != PRO_TK_NO_ERROR ||
+                        ProSelectionAlloc(NULL, &it, &sel) != PRO_TK_NO_ERROR ||
+                        ProSelectionToReference(sel, &ref) != PRO_TK_NO_ERROR ||
+                        ProCrvcollinstrAlloc(PRO_CURVCOLL_ADD_ONE_INSTR, &ins) != PRO_TK_NO_ERROR ||
+                        ProCrvcollinstrReferenceAdd(ins, ref) != PRO_TK_NO_ERROR ||
+                        ProCrvcollectionInstructionAdd(col, ins) != PRO_TK_NO_ERROR) {
+                        fclose(f);
+                        error_json("plan", aid, "Arista no valida (no existe en la pieza)");
+                        return 2;
+                    }
+                    ProSelectionFree(&sel);
+                    n_ar++;
+                }
+                if (n_ar == 0 || ProElementCollectionSet(el, col) != PRO_TK_NO_ERROR) lineas_mal++;
             } /* 'c': compuesto, ya creado */
             continue;
         }
@@ -1240,6 +1396,20 @@ static int orden_crear(const char *fichero)
                 borrar_ids((ProSolid)mdl, &feat.id, 1);
                 ultimo = PRO_TK_GENERAL_ERROR;
                 continue;
+            }
+            if (n_sin_aristas > 0) {
+                /* redondeo/chaflan: las aristas pedidas deben haber desaparecido */
+                int k, quedan = -1;
+                for (k = 0; k < n_sin_aristas; k++) {
+                    ProEdge ed;
+                    if (ProEdgeInit((ProSolid)mdl, sin_aristas[k], &ed) == PRO_TK_NO_ERROR) { quedan = sin_aristas[k]; break; }
+                }
+                if (quedan >= 0) {
+                    borrar_ids((ProSolid)mdl, &feat.id, 1);
+                    error_json("verificacion", quedan, "La arista sigue en la pieza tras crear la operacion: se ha borrado");
+                    ProArrayFree((ProArray *)&opts); ProSelectionFree(&msel); ProElementFree(&raiz);
+                    return 6;
+                }
             }
             memset(&eje, 0, sizeof(eje));
             ProFeatureGeomitemVisit(&feat, PRO_AXIS, visita_eje_creado, NULL, &eje);
@@ -1398,7 +1568,7 @@ int main(int argc, char *argv[])
     const char *modelo = NULL, *plan = NULL, *ids = NULL;
     int rapido = 0, i, rc;
     static const char *ordenes[] = {"estado", "interferencias", "taladros", "posiciones", "caras",
-                                    "seleccion", "crear", "borrar", "arbol", NULL};
+                                    "seleccion", "crear", "borrar", "arbol", "aristas", NULL};
     int valida = 0;
 
     orden_actual = argc > 1 ? argv[1] : "";
@@ -1411,7 +1581,7 @@ int main(int argc, char *argv[])
     for (i = 0; ordenes[i]; i++) if (!strcmp(orden_actual, ordenes[i])) valida = 1;
     if (!valida) {
         error_json("argumentos", -1, "Orden desconocida. Ordenes: estado, interferencias, taladros, posiciones, "
-                   "caras, seleccion, crear, borrar, arbol");
+                   "caras, seleccion, crear, borrar, arbol, aristas");
         return 2;
     }
     if (!conectar()) return 3;
@@ -1424,6 +1594,7 @@ int main(int argc, char *argv[])
     else if (!strcmp(orden_actual, "seleccion")) rc = orden_seleccion();
     else if (!strcmp(orden_actual, "crear")) rc = orden_crear(plan);
     else if (!strcmp(orden_actual, "arbol")) rc = orden_arbol(modelo, ids);
+    else if (!strcmp(orden_actual, "aristas")) rc = orden_aristas(modelo);
     else rc = orden_borrar(modelo, ids);
 
     ProEngineerDisconnect(&sesion, 10);

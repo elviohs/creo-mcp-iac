@@ -515,6 +515,100 @@ def planificar_patron(peticion: dict[str, Any], caras: dict[str, Any], guia: dic
     return {"plan": "\n".join(lineas) + "\n", "resumen": resumen, "avisos": avisos, "ids_caras": [cara["id"]]}
 
 
+# --------------------------------------------------------------- redondeos
+
+def _corregir_forma(datos: dict[str, Any]) -> dict[str, Any]:
+    """creo_iac_tk 0.5.0 daba cóncava/convexa al revés (corregido en 0.5.1)."""
+    if datos.get("version_tk") != "0.5.0":
+        return datos
+    cambio = {"concava": "convexa", "convexa": "concava"}
+    return {**datos, "aristas": [{**a, "forma": cambio.get(a.get("forma"), a.get("forma"))}
+                                 for a in datos.get("aristas", [])]}
+
+
+def resumir_aristas(datos: dict[str, Any], forma: str | None = None, cara: int | None = None,
+                    longitud_min: float = 0.0, maximo: int = 300, direccion: str | None = None) -> dict[str, Any]:
+    """Aristas de la pieza filtradas por forma (concava, convexa, tangente), cara, longitud y
+    dirección (X, Y o Z: rectas paralelas a ese eje, p. ej. las esquinas interiores paralelas al
+    eje de la fresa)."""
+    out = []
+    datos = _corregir_forma(datos)
+    for a in datos.get("aristas", []):
+        if forma and a.get("forma") != forma:
+            continue
+        if cara is not None and cara not in (a.get("caras") or []):
+            continue
+        if (a.get("longitud") or 0) < longitud_min:
+            continue
+        x = {"id": a["id"], "tipo": a.get("tipo"), "forma": a.get("forma"), "longitud": round(a.get("longitud", 0), 3),
+             "caras": a.get("caras"), "medio": _r(a.get("medio"), 3)}
+        t = a.get("tangente")
+        if t and a.get("tipo") == "recta":
+            o = orientacion(t) or orientacion([-c for c in t])
+            if o:
+                x["direccion"] = o.lstrip("+-")
+        if direccion and x.get("direccion") != direccion.strip().upper().lstrip("+-"):
+            continue
+        out.append(x)
+    out.sort(key=lambda x: (x["forma"] != "concava", -x["longitud"]))
+    return {"modelo": f"{datos['modelo']['nombre']}.PRT", "unidad_longitud": datos.get("unidad_longitud"),
+            "aristas": out[:maximo], "total": len(out), "truncado": len(out) > maximo,
+            "total_pieza": datos.get("total")}
+
+
+def planificar_redondeo(peticion: dict[str, Any], aristas: dict[str, Any], nombre: str) -> dict[str, Any]:
+    """Redondeo de radio constante sobre una o varias aristas (una operación). No toca Creo."""
+    ids = [int(i) for i in (peticion.get("aristas") or [])]
+    if not ids:
+        raise PlanError("aristas: lista de ids (aristas_creo o seleccion_creo).")
+    if len(set(ids)) != len(ids) or len(ids) > 64:
+        raise PlanError("aristas: ids sin repetir, como mucho 64.")
+    radio = float(peticion.get("radio") or 0)
+    if radio <= 0:
+        raise PlanError("radio: obligatorio y positivo (mm).")
+    aristas = _corregir_forma(aristas)
+    por_id = {a["id"]: a for a in aristas.get("aristas", [])}
+    sel, avisos = [], []
+    for i in ids:
+        a = por_id.get(i)
+        if a is None:
+            raise PlanError(f"La arista {i} no existe en la pieza (vuelve a leer con aristas_creo).")
+        if a.get("forma") == "tangente":
+            raise PlanError(f"La arista {i} une dos caras tangentes: no hay esquina que redondear.")
+        sel.append(a)
+        if a.get("longitud") and radio > a["longitud"]:
+            avisos.append(f"El radio ({radio:g}) es mayor que la arista {i} ({a['longitud']:.2f} mm): Creo puede no poder hacerlo.")
+    formas = sorted({a.get("forma") for a in sel})
+    modelo = aristas["modelo"]["nombre"] + ".PRT"
+    lista = " ".join(map(str, ids))
+    e = ["e 386.387 i 913", f"e 386.1964 w {nombre}",
+         "e 386.2101.2102.2178 i 0",                 # radio constante
+         "e 386.2101.2102.2177.2119 i 2",            # sin cónica
+         "e 386.2101.2102.2121.2179 i 1",            # referencias: aristas
+         f"e 386.2101.2102.2121.2124 k {lista}",
+         "e 386.2101.2102.2123.2122.2106.2108 i 1",  # radio por valor
+         f"e 386.2101.2102.2123.2122.2106.2109 d {radio:.4f}",
+         "e 386.3042 i 0"]                           # unido a la pieza
+    resumen = {"modelo": modelo, "radio": radio, "aristas": [
+        {"id": a["id"], "forma": a.get("forma"), "longitud": round(a.get("longitud", 0), 3),
+         "medio": _r(a.get("medio"), 3)} for a in sel], "formas": formas, "nombre": nombre}
+    # La comprobación de que las aristas han desaparecido la hace el servidor releyendo las aristas
+    # (ProEdgeInit no sirve: en Creo 12.4 devuelve la arista aunque ya no esté, visto el 2026-11-24).
+    lineas = [f"modelo {modelo}", *e]
+    return {"plan": "\n".join(lineas) + "\n", "resumen": resumen, "avisos": avisos}
+
+
+def huella_aristas(aristas: dict[str, Any], ids: list[int]) -> str:
+    import hashlib
+    import json
+
+    por_id = {a["id"]: a for a in aristas.get("aristas", [])}
+    partes = [aristas["modelo"]["nombre"]] + [
+        [i, _r(por_id[i].get("medio"), 4), round(por_id[i].get("longitud", 0), 4)] if i in por_id else [i, None]
+        for i in sorted(ids)]
+    return hashlib.sha256(json.dumps(partes).encode()).hexdigest()[:16]
+
+
 # --------------------------------------------------------------- resúmenes
 
 TIPOS_ELEMENTO = {1: "conjunto", 2: "pieza", 3: "operacion", 5: "cara", 6: "arista", 21: "eje",
@@ -599,9 +693,9 @@ def huella(caras: dict[str, Any], ids_caras: list[int], ids_planos: list[int]) -
 
 # Líneas que admite el servicio en un plan (defensa adicional: nada de rutas ni órdenes).
 PLAN_RE = re.compile(r"^(modelo [A-Za-z0-9_\-]{1,80}\.PRT|serie [A-Za-z0-9_]{1,30}|tamano [A-Za-z0-9_.]{1,30}|"
-                     r"e [0-9.]{3,150} (i -?\d+|d -?\d+(\.\d+)?|b [01]|r \d+ -?\d+|w [A-Z0-9_]{1,31}|c)|"
+                     r"e [0-9.]{3,150} (i -?\d+|d -?\d+(\.\d+)?|b [01]|r \d+ -?\d+|w [A-Z0-9_]{1,31}|c|k( \d+){1,64})|"
                      r"verificar( -?\d+(\.\d+)?){6}|alternar(_i)? [0-9.]+ [0-9.]+|patron \d+|"
-                     r"esperado( -?\d+(\.\d+)?){3})$")
+                     r"esperado( -?\d+(\.\d+)?){3}|sin_aristas( \d+){1,64})$")
 
 
 def plan_valido(texto: str) -> bool:

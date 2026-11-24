@@ -26,8 +26,8 @@ from .formato import add_dim_text, blank, check_mass_param, clean_params, masspr
 from .gateway import CAJETIN_PARAMS, CONFIG_OPTIONS, CreoGateway, CreoUnavailableError, NotAllowedError, ScopeError
 from .nativo import (Nativo, NativoError, NativoSinRespuesta, resumir_interferencias, resumir_operacion,
                      resumir_taladros)
-from .operaciones import (PlanError, huella, leer_hol, nombre_operacion, planificar_patron, planificar_taladro,
-                          resumir_caras, resumir_seleccion)
+from .operaciones import (PlanError, huella, huella_aristas, leer_hol, nombre_operacion, planificar_patron,
+                          planificar_redondeo, planificar_taladro, resumir_aristas, resumir_caras, resumir_seleccion)
 from .tareas import GestorTareas
 
 INSTRUCTIONS = """\
@@ -52,6 +52,9 @@ Servidor de SOLO LECTURA sobre Creo Parametric (IAC, Departamento de Ingeniería
   Creo). Si `aplicar_parametros_excel` está activa (CREO_MCP_ALLOW_PARAMETERS=1), solo
   la uses tras enseñar al usuario la tabla de `revisar_parametros_excel` y recibir su
   confirmación expresa; cambia parámetros del cajetín en sesión y no guarda.
+- Redondeos: `aristas_creo` (aristas cóncavas = esquinas interiores) → `proponer_redondeos` →
+  confirmación → `crear_redondeos`. Útil para corregir esquinas vivas que señale la revisión de
+  fabricabilidad; el radio lo decide el usuario (p. ej. mayor que el de la fresa).
 - Taladros en piezas: `seleccion_creo` (lo que el usuario seleccionó en Creo) o `caras_creo`
   para saber la cara y el punto; `proponer_taladros` prepara la tabla sin tocar Creo y da un
   `codigo`. Enseña la tabla y, solo con la confirmación expresa del usuario, `crear_taladros`
@@ -173,6 +176,7 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
     # Taladros: propuestas pendientes de confirmar y escritura con resultado desconocido.
     propuestas: dict[str, dict[str, Any]] = {}
     propuestas_patron: dict[str, dict[str, Any]] = {}
+    propuestas_redondeo: dict[str, dict[str, Any]] = {}
     estado_ops: dict[str, Any] = {"desconocido": None}
     PROPUESTA_VALIDA_S = 1800
     mcp = FastMCP("creo-iac-lectura", instructions=INSTRUCTIONS)
@@ -266,7 +270,7 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
     ) -> dict[str, Any]:
         """Recoge el resultado de una herramienta larga que respondió «en_curso» (exportar_step,
         exportar_bom_excel, presupuesto_masas, revisar_estandares, interferencias_creo,
-        taladros_creo, crear_taladros). Si aún no ha terminado, espera hasta esperar_s y vuelve a dar el estado:
+        taladros_creo, crear_taladros, crear_patron, crear_redondeos). Si aún no ha terminado, espera hasta esperar_s y vuelve a dar el estado:
         llámala otra vez. No repitas la herramienta original mientras siga en curso."""
         t = tareas.obtener(tarea_id)
         return tareas.entregar(t, min(esperar_s, tareas.espera_s))
@@ -1401,6 +1405,67 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
             r["avisos"] = pl["avisos"]
         return r
 
+    @mcp.tool(annotations=READ)
+    @guard
+    def aristas_creo(
+        modelo: ModelArg = None,
+        forma: Annotated[Literal["concava", "convexa", "tangente"] | None, Field(
+            description="concava = esquina interior (p. ej. de una cajera, la que la fresa no puede dejar viva); "
+                        "convexa = esquina exterior. Vacío = todas")] = None,
+        cara: Annotated[int | None, Field(description="Solo las aristas de esta cara (id de caras_creo)")] = None,
+        longitud_min: Annotated[float, Field(ge=0, description="Longitud mínima (mm)")] = 0.0,
+        direccion: Annotated[Literal["X", "Y", "Z"] | None, Field(
+            description="Solo aristas rectas paralelas a este eje de la pieza: con forma=concava y el eje de "
+                        "la fresa, son las esquinas interiores que la fresa deja con su radio")] = None,
+    ) -> dict[str, Any]:
+        """Aristas de una pieza (Creo Toolkit): id, recta o arco, longitud, punto medio, dirección,
+        las dos caras que une y si es cóncava (esquina interior) o convexa. Sirve para elegir SOLO
+        las aristas que necesitan radio para fabricarse: las esquinas interiores paralelas al eje de
+        la fresa (forma=concava, direccion = eje de la fresa) o las que señale la revisión de
+        fabricabilidad (se localizan por el punto medio). Las aristas del fondo de una cajera no
+        necesitan radio con fresa plana. No modifica Creo."""
+        datos = nat.ejecutar("aristas", _pieza(modelo))
+        return {**resumir_aristas(datos, forma, cara, longitud_min, direccion=direccion),
+                "fuente": "Creo Toolkit (creo_iac_tk), aristas de la pieza"}
+
+    @mcp.tool(annotations=READ)
+    @guard
+    def proponer_redondeos(
+        aristas: Annotated[list[int], Field(min_length=1, max_length=64,
+                                            description="Ids de las aristas (aristas_creo o seleccion_creo)")],
+        radio: Annotated[float, Field(gt=0, le=500, description="Radio (mm)")],
+        modelo: ModelArg = None,
+    ) -> dict[str, Any]:
+        """Prepara un redondeo de radio constante sobre aristas de una pieza SIN tocar Creo: comprueba
+        que existen y no son tangentes, y devuelve la tabla y un `codigo`. Para esquinas interiores
+        de cajeras, el radio debe ser mayor que el de la fresa que se vaya a usar (pregúntalo o usa
+        el de la revisión de fabricabilidad). Enseña la tabla y, solo con la confirmación expresa del
+        usuario, crea con crear_redondeos(codigo). Un radio por propuesta."""
+        m = _pieza(modelo)
+        datos = nat.ejecutar("aristas", m)
+        nombre = nombre_operacion(f"RED_R{radio:g}", f"{datetime.now():%H%M%S}")
+        try:
+            pl = planificar_redondeo({"aristas": list(aristas), "radio": radio}, datos, nombre)
+        except PlanError as e:
+            raise ValueError(str(e)) from e
+        codigo = "R" + hashlib.sha256(pl["plan"].encode()).hexdigest()[:7].upper()
+        ahora = time.time()
+        for k in [k for k, v in propuestas_redondeo.items() if ahora - v["creada"] > PROPUESTA_VALIDA_S]:
+            propuestas_redondeo.pop(k, None)
+        propuestas_redondeo[codigo] = {"modelo": pl["resumen"]["modelo"], "plan": pl["plan"], "resumen": pl["resumen"],
+                                       "creada": ahora, "ids": list(aristas),
+                                       "huella": huella_aristas(datos, list(aristas))}
+        gw.audit.write(event="propuesta_redondeo", modelo=pl["resumen"]["modelo"], codigo=codigo, n=len(aristas))
+        r = {"codigo": codigo, **pl["resumen"], "crear_activo": settings.allow_operaciones,
+             "siguiente": ("Enseña la tabla (aristas, forma, longitud, punto medio y radio) y pide confirmación "
+                           "expresa. Solo entonces llama a crear_redondeos con este código."
+                           if settings.allow_operaciones else
+                           "La creación está desactivada en esta instalación (CREO_MCP_ALLOW_OPERACIONES=1)."),
+             "fuente": "Creo Toolkit (aristas de la pieza)"}
+        if pl["avisos"]:
+            r["avisos"] = pl["avisos"]
+        return r
+
     if settings.allow_operaciones:
 
         @mcp.tool(annotations=DRAW_DESTRUCTIVE)
@@ -1505,6 +1570,63 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
                                "miembros_creados": [m_.get("id") for m_ in op.get("miembros", [])]},
                     "aviso": "Pieza modificada en la sesión de Creo, SIN GUARDAR. Revísala y guarda tú si estás conforme. "
                              "Para deshacer: borrar_operaciones_ia con el id del patrón."}
+
+        @mcp.tool(annotations=DRAW_DESTRUCTIVE)
+        @guard
+        @tareas.larga
+        def crear_redondeos(
+            codigo: Annotated[str, Field(description="Código que devolvió proponer_redondeos")],
+        ) -> dict[str, Any]:
+            """Crea en Creo el redondeo de una propuesta ya confirmada por el usuario.
+
+            Solo con la confirmación expresa del usuario sobre la tabla de proponer_redondeos. Vuelve
+            a leer las aristas: si han cambiado, no crea nada. El redondeo se llama IA_RED_* y se
+            comprueba que las aristas han desaparecido (si no, se borra). Nunca guarda. Para deshacer,
+            borrar_operaciones_ia con su id."""
+            if estado_ops["desconocido"]:
+                raise ValueError("Hay una escritura anterior con resultado desconocido. Comprueba Creo "
+                                 "(operaciones_creo) y vuelve a proponer antes de crear nada.")
+            p = propuestas_redondeo.pop((codigo or "").strip().upper(), None)
+            if p is None:
+                raise ValueError("No hay ninguna propuesta de redondeo con ese código (vale una vez, 30 min). "
+                                 "Vuelve a llamar a proponer_redondeos.")
+            if time.time() - p["creada"] > PROPUESTA_VALIDA_S:
+                raise ValueError("La propuesta ha caducado (30 min). Vuelve a llamar a proponer_redondeos.")
+            datos = nat.ejecutar("aristas", p["modelo"])
+            if huella_aristas(datos, p["ids"]) != p["huella"]:
+                raise ValueError("Las aristas han cambiado desde la propuesta: no se ha creado nada. "
+                                 "Vuelve a llamar a aristas_creo y proponer_redondeos.")
+            try:
+                r = nat.ejecutar("crear", plan=p["plan"])
+            except NativoSinRespuesta as e:
+                estado_ops["desconocido"] = {**p["resumen"], "error": str(e)[:200]}
+                gw.audit.write(event="resultado_desconocido", tool="crear_redondeos", modelo=p["modelo"])
+                return {"estado": "resultado_desconocido", "redondeo": p["resumen"],
+                        "que_hacer": "Creo no respondió a tiempo: el redondeo puede haberse creado o no. Comprueba con "
+                                     "operaciones_creo si existe " + str(p["resumen"].get("nombre")) + "."}
+            op = r.get("operacion") or {}
+            # Comprobación: las aristas redondeadas ya no están en la pieza.
+            quedan = []
+            try:
+                despues = nat.ejecutar("aristas", p["modelo"])
+                vivas = {x["id"] for x in despues.get("aristas", [])}
+                quedan = [i for i in p["ids"] if i in vivas]
+            except NativoError:
+                pass
+            if quedan and op.get("id"):
+                try:
+                    nat.ejecutar("borrar", p["modelo"], ids=[op["id"]])
+                    borrado = True
+                except NativoError:
+                    borrado = False
+                gw.audit.write(event="verificacion_fallida", tool="crear_redondeos", modelo=p["modelo"], quedan=quedan)
+                raise ValueError(f"El redondeo se creó pero las aristas {quedan} siguen en la pieza: "
+                                 + ("se ha borrado." if borrado else f"NO se pudo borrar (id {op['id']}); bórralo a mano."))
+            gw.audit.write(event="operacion_creada", modelo=p["modelo"], id=op.get("id"), nombre=op.get("nombre"))
+            return {"estado": "ok", "modelo": p["modelo"], "aristas_comprobadas": True,
+                    "redondeo": {**p["resumen"], "id": op.get("id"), "nombre": op.get("nombre") or p["resumen"]["nombre"]},
+                    "aviso": "Pieza modificada en la sesión de Creo, SIN GUARDAR. Revísala y guarda tú si estás conforme. "
+                             "Para deshacer: borrar_operaciones_ia con el id del redondeo."}
 
         @mcp.tool(annotations=DRAW_DESTRUCTIVE)
         @guard
