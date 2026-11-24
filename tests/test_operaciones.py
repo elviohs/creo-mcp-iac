@@ -182,7 +182,7 @@ class CreoSimulado:
             r = self.crear.pop(0) if self.crear else None
             if isinstance(r, BaseException):
                 raise r
-            if r is None and "e 386.387 i 913" in plan:
+            if r is None and ("e 386.387 i 913" in plan or "e 386.387 i 914" in plan):
                 self.aristas_creadas = True
                 r = {"ok": True, "modelo": {"nombre": "PRUEBA_CMD", "tipo": "PRT"},
                      "operacion": {"id": 1600, "nombre": "IA_RED", "intentos": 1}, "guardado": False}
@@ -320,7 +320,8 @@ async def test_sin_escritura_solo_propone(tmp_path, fake):
     srv = servidor(tmp_path, fake, creo, escritura=False)
     nombres = {t.name for t in srv._tool_manager.list_tools()}
     assert {"caras_creo", "seleccion_creo", "proponer_taladros"} <= nombres
-    assert not {"crear_taladros", "borrar_operaciones_ia", "crear_patron", "crear_redondeos"} & nombres
+    assert not {"crear_taladros", "borrar_operaciones_ia", "crear_patron", "crear_redondeos",
+                "crear_chaflanes"} & nombres
     err, p = await call(srv, "proponer_taladros", taladros=TALADROS[:1])
     assert not err and p["crear_activo"] is False and "desactivada" in p["siguiente"]
     err, msg = await call(srv, "caras_creo", modelo="TOP.ASM")
@@ -531,6 +532,41 @@ async def test_proponer_y_crear_redondeo(tmp_path, fake):
     err, msg = await call(srv, "crear_redondeos", codigo=p["codigo"])
     assert err and "siguen en la pieza" in msg and "se ha borrado" in msg
     assert creo.llamadas[-1][1] == "borrar"
+
+
+def test_plan_de_chaflan():
+    pl = ops.planificar_chaflan({"aristas": [2002], "distancia": 1.5}, ARISTAS, "IA_CHF_1_5_1")
+    p = pl["plan"].splitlines()
+    assert "e 386.387 i 914" in p and "e 386.2101.2102.2103 i 601" in p and "e 386.2101.2102.3184 i 1" in p
+    assert "e 386.2101.2102.2121.2124 k 2002" in p and "e 386.2101.2102.2123.2122.2106.2109 d 1.5000" in p
+    assert ops.plan_valido(pl["plan"]) and not pl["avisos"] and pl["resumen"]["tipo"] == "chaflan"
+    assert "radio" not in pl["resumen"] and pl["resumen"]["distancia"] == 1.5
+    dxd = ops.planificar_chaflan({"aristas": [2001], "distancia": 1, "esquema": "DxD"}, ARISTAS, "X")
+    assert "e 386.2101.2102.2103 i 602" in dxd["plan"] and any("interiores" in a for a in dxd["avisos"])
+    for pet, txt in [({"aristas": [2002], "distancia": 0}, "distancia"),
+                     ({"aristas": [2002], "distancia": 1, "esquema": "D1xD2"}, "esquema"),
+                     ({"aristas": [2003], "distancia": 1}, "tangentes")]:
+        with pytest.raises(ops.PlanError, match=txt):
+            ops.planificar_chaflan(pet, ARISTAS, "X")
+
+
+@pytest.mark.anyio
+async def test_proponer_y_crear_chaflan(tmp_path, fake):
+    fake.files = ["PRUEBA_CMD.PRT"]
+    fake.active = "PRUEBA_CMD.PRT"
+    creo = CreoSimulado()
+    srv = servidor(tmp_path, fake, creo)
+    err, p = await call(srv, "proponer_chaflanes", aristas=[2002], distancia=1)
+    assert not err, p
+    assert p["codigo"].startswith("C") and p["nombre"].startswith("IA_CHF_1_") and p["esquema"] == "45xD"
+    # un código de chaflán no vale para crear_redondeos (y no se consume)
+    err, msg = await call(srv, "crear_redondeos", codigo=p["codigo"])
+    assert err and "redondeo" in msg
+    err, r = await call(srv, "crear_chaflanes", codigo=p["codigo"])
+    assert not err and r["estado"] == "ok" and r["chaflan"]["id"] == 1600 and r["aristas_comprobadas"]
+    assert "e 386.387 i 914" in creo.planes[0] and "k 2002" in creo.planes[0]
+    err, msg = await call(srv, "crear_chaflanes", codigo=p["codigo"])
+    assert err and "proponer_chaflanes" in msg
 
 
 def test_forma_invertida_en_tk_050():

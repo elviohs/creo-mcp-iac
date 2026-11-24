@@ -12,10 +12,10 @@ Asistente ──stdio──▶ creo-mcp-iac ──HTTP localhost──▶ CREOSO
 
 - **CREOSON** (creopyson): lectura de modelos, planos, BOM y masas; exportación STEP/PDF.
 - **Programa propio en C con Creo Toolkit** (`native/`): lo que CREOSON no hace — interferencias
-  nativas, operaciones de taladro, caras, aristas y selección, y creación de taladros, patrones y
-  redondeos.
+  nativas, operaciones de taladro, caras, aristas y selección, y creación de taladros, patrones,
+  redondeos y chaflanes.
 
-Versión 0.12.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nativo:
+Versión 0.13.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nativo:
 [`native/README.md`](native/README.md).
 
 ## Principios
@@ -51,7 +51,8 @@ Versión 0.12.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nati
 | `proponer_patron` / `crear_patron` | Patrones lineales (1 o 2 direcciones) o circulares de un taladro | Patrón `IA_PAT_*`, sin guardar |
 | `aristas_creo` | Aristas con sus caras, punto medio, dirección y si son cóncavas (esquina interior) o convexas | No |
 | `proponer_redondeos` / `crear_redondeos` | Redondeo de radio constante en las aristas elegidas (p. ej. esquinas interiores que la fresa no puede dejar vivas) | Redondeo `IA_RED_*`, sin guardar |
-| `borrar_operaciones_ia` | Deshace operaciones, patrones y redondeos `IA_*` | Borra `IA_*`, sin guardar |
+| `proponer_chaflanes` / `crear_chaflanes` | Chaflán de distancia constante (45×D o D×D) en las aristas elegidas (romper aristas vivas, entradas de taladros y ejes) | Chaflán `IA_CHF_*`, sin guardar |
+| `borrar_operaciones_ia` | Deshace operaciones, patrones, redondeos y chaflanes `IA_*` | Borra `IA_*`, sin guardar |
 | `resultado_tarea`, `listar_tareas` | Recoger el resultado de herramientas largas | No |
 
 Las herramientas largas (exportaciones, BOM, masas, estándares, interferencias, taladros) responden
@@ -82,6 +83,10 @@ esquinas que señale una revisión de fabricabilidad se localizan por su punto m
 `proponer_redondeos` prepara la tabla con las aristas elegidas y el radio (mayor que el de la
 fresa; lo decide el usuario) y `crear_redondeos` lo crea tras la confirmación, comprobando
 releyendo la pieza que esas aristas han desaparecido.
+
+Los chaflanes siguen el mismo camino: `proponer_chaflanes` (distancia D, esquema 45×D —el
+habitual, «Ch D×45°»— o D×D; normalmente en aristas exteriores, avisa si alguna es interior) y
+`crear_chaflanes`.
 
 ## Configuración
 

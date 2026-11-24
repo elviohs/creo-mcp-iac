@@ -598,6 +598,39 @@ def planificar_redondeo(peticion: dict[str, Any], aristas: dict[str, Any], nombr
     return {"plan": "\n".join(lineas) + "\n", "resumen": resumen, "avisos": avisos}
 
 
+ESQUEMAS_CHAFLAN = {"45xD": 601, "DxD": 602}
+
+
+def planificar_chaflan(peticion: dict[str, Any], aristas: dict[str, Any], nombre: str) -> dict[str, Any]:
+    """Chaflán de distancia constante (45×D o D×D) sobre una o varias aristas. No toca Creo."""
+    esquema = str(peticion.get("esquema") or "45xD")
+    if esquema not in ESQUEMAS_CHAFLAN:
+        raise PlanError("esquema: 45xD (45° y distancia D) o DxD (misma distancia a las dos caras).")
+    d = float(peticion.get("distancia") or 0)
+    if d <= 0:
+        raise PlanError("distancia: obligatoria y positiva (mm).")
+    # se reutilizan las comprobaciones del redondeo (aristas, tangentes, longitud)
+    base = planificar_redondeo({"aristas": peticion.get("aristas"), "radio": d}, aristas, nombre)
+    avisos = [a.replace("El radio", "La distancia") for a in base["avisos"]]
+    concavas = [a["id"] for a in base["resumen"]["aristas"] if a.get("forma") == "concava"]
+    if concavas:
+        avisos.append(f"Las aristas {concavas} son esquinas interiores: un chaflán ahí AÑADE material. Lo normal es "
+                      "achaflanar aristas exteriores (convexas).")
+    lista = " ".join(str(a["id"]) for a in base["resumen"]["aristas"])
+    e = ["e 386.387 i 914", f"e 386.1964 w {nombre}",
+         f"e 386.2101.2102.2103 i {ESQUEMAS_CHAFLAN[esquema]}",
+         "e 386.2101.2102.3184 i 1",                 # forma: superficies desplazadas
+         "e 386.2101.2102.2121.2179 i 1",            # referencias: aristas
+         f"e 386.2101.2102.2121.2124 k {lista}",
+         "e 386.2101.2102.2123.2122.2106.2108 i 1",  # distancia por valor
+         f"e 386.2101.2102.2123.2122.2106.2109 d {d:.4f}",
+         "e 386.3042 i 0"]
+    resumen = {k: v for k, v in base["resumen"].items() if k != "radio"}
+    resumen.update(esquema=esquema, distancia=d, nombre=nombre, tipo="chaflan")
+    lineas = [f"modelo {base['resumen']['modelo']}", *e]
+    return {"plan": "\n".join(lineas) + "\n", "resumen": resumen, "avisos": avisos}
+
+
 def huella_aristas(aristas: dict[str, Any], ids: list[int]) -> str:
     import hashlib
     import json
