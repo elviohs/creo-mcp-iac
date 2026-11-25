@@ -1783,9 +1783,12 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
         tocar Creo. Sirve para levantar una pieza a partir de un boceto acotado: primero una extrusión
         con el contorno exterior, luego cortes, taladros, redondeos y chaflanes. Para empezar una pieza
         nueva, el usuario crea en Creo una pieza vacía con la plantilla del IAC y la deja abierta.
-        Calcula el área y el volumen teórico y comprueba que los contornos no se corten. Devuelve la
-        tabla y un `codigo`: enséñala (contornos con sus medidas, plano, extensión, sentido) y, solo con
-        la confirmación expresa del usuario, crea con crear_extrusion(codigo)."""
+        Calcula el área y el volumen teórico y comprueba que los contornos no se corten. El croquis se
+        acota con las cotas del boceto (diámetros, radios, posición de centros y vértices desde los planos
+        de referencia, ancho y alto); Creo completa lo que falte. Para que las cotas salgan como en el
+        dibujo, da los arcos por su centro cuando el dibujo lo acote. Devuelve la tabla y un `codigo`:
+        enséñala (contornos con sus medidas, cotas, plano, extensión, sentido) y, solo con la confirmación
+        expresa del usuario, crea con crear_extrusion(codigo)."""
         m = _pieza(modelo)
         caras = _caras(m)
         nombre = nombre_operacion("EXT" if tipo == "anadir" else "CORTE", f"{datetime.now():%H%M%S}")
@@ -2039,9 +2042,16 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
                     "extrusion": {**p["resumen"], "id": op.get("id"), "nombre": op.get("nombre") or p["resumen"]["nombre"],
                                   "intentos": op.get("intentos"), "cambio_volumen_mm3": op.get("cambio_volumen"),
                                   "volumen_pieza_mm3": op.get("volumen_despues"),
-                                  "extension_en_eje": [op.get("extension_min"), op.get("extension_max")]},
+                                  "extension_en_eje": [op.get("extension_min"), op.get("extension_max")],
+                                  "cotas_croquis": op.get("cotas_croquis"),
+                                  "cotas_en_creo": [f"{c.get('tipo')} {c.get('valor'):.4f}" + (" (boceto)" if c.get("del_boceto") else "")
+                                                    for c in op.get("cotas", []) if isinstance(c.get("valor"), (int, float))],
+                                  "desviacion_croquis_mm": op.get("desviacion_croquis_mm"),
+                                  **({"avisos_croquis": op["avisos_croquis"]} if op.get("avisos_croquis") else {})},
                     "aviso": "Pieza modificada en la sesión de Creo, SIN GUARDAR. Revísala y guarda tú si estás conforme. "
-                             "Para deshacer: borrar_operaciones_ia con su id."}
+                             "Para deshacer: borrar_operaciones_ia con su id."
+                             + (" Las cotas del boceto chocaron con restricciones de Creo y el croquis quedó con el "
+                                "acotado automático: revisa sus cotas." if op.get("cotas_croquis") == "automaticas_por_conflicto" else "")}
 
         @mcp.tool(annotations=DRAW_DESTRUCTIVE)
         @guard

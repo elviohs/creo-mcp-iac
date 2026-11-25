@@ -69,12 +69,14 @@
 #include "ProMaterial.h"
 #include "ProElempath.h"
 #include "ProSection.h"
+#include "ProSecdim.h"
+#include "ProSecdimType.h"
 #include "ProSecerror.h"
 #include "Pro2dEntdef.h"
 #include <time.h>
 #include "salida.h"
 
-#define VERSION_TK "0.7.1"
+#define VERSION_TK "0.8.0"
 #define MAX_MODELOS 20000
 
 static ProProcessHandle sesion;
@@ -1424,6 +1426,20 @@ static int n_sk = 0;
 static int sk_refs[8][2];
 static int n_sk_refs = 0;
 
+/* Cotas del boceto (0.8.0): se crean como cotas fuertes antes del acotado automatico. */
+#define MAX_COTAS 200
+typedef struct { int tipo, ent, ent2, ref, pt; double valor, lugar[3]; } CotaSk;
+/* tipo: 1 diametro, 2 radio, 3 punto a referencia, 4 recta a referencia, 5 entre dos rectas */
+static CotaSk sk_cotas[MAX_COTAS];
+static int n_cotas = 0;
+static int sk_ids[MAX_SK];
+static int sk_proj[8];
+typedef struct { int tipo; double valor; int propia; } CotaRes;
+static CotaRes cotas_res[MAX_COTAS];
+static int n_cotas_res = 0, cotas_fallidas = 0, cotas_propias = 0;
+static const char *cotas_estado = "automaticas";
+static double desviacion_sk = -1;
+
 /* Punto del modelo -> coordenadas 2D de la seccion (matriz seccion -> modelo, por filas). */
 static void a_seccion(ProMatrix m, const double *p, double *uv)
 {
@@ -1469,7 +1485,7 @@ static ProError construir_seccion(ProMdl mdl, ProSection sec, const char **fase)
     ProMatrix m;
     ProWSecerror err = NULL;
     ProError e;
-    int i, id;
+    int i, id, own[MAX_COTAS], n_own = 0;
     *fase = "situacion";
     if ((e = ProSectionLocationGet(sec, m)) != PRO_TK_NO_ERROR) return e;
     *fase = "referencias";
@@ -1481,6 +1497,7 @@ static ProError construir_seccion(ProMdl mdl, ProSection sec, const char **fase)
         e = ProSectionEntityFromProjection(sec, sel, &id);
         ProSelectionFree(&sel);
         if (e != PRO_TK_NO_ERROR) return e;
+        sk_proj[i] = id;
     }
     *fase = "entidades";
     for (i = 0; i < n_sk; i++) {
@@ -1515,19 +1532,117 @@ static ProError construir_seccion(ProMdl mdl, ProSection sec, const char **fase)
             e = ProSectionEntityAdd(sec, (Pro2dEntdef *)&ci, &id);
         }
         if (e != PRO_TK_NO_ERROR) return e;
+        sk_ids[i] = id;
     }
-    /* Como en Ug3DSection.c: acotado automatico y regenerar (ProSectionAutodim ya resuelve;
-       ProSectionSolve despues devuelve PRO_TK_BAD_INPUTS, visto el 2026-11-25). */
+    /* Cotas del boceto como cotas fuertes; el acotado automatico solo anade las que falten. */
+    n_own = 0;
+    cotas_fallidas = 0;
+    cotas_estado = n_cotas > 0 ? "boceto" : "automaticas";
+    *fase = "cotas";
+    for (i = 0; i < n_cotas && i < MAX_COTAS; i++) {
+        CotaSk *c = &sk_cotas[i];
+        int ents[2];
+        ProSectionPointType pts[2];
+        int n = 0, did = -1;
+        ProSecdimType tipo;
+        Pro2dPnt lugar;
+        if (c->ent < 0 || c->ent >= n_sk || (c->tipo == 5 && (c->ent2 < 0 || c->ent2 >= n_sk)) ||
+            ((c->tipo == 3 || c->tipo == 4) && (c->ref < 0 || c->ref >= n_sk_refs))) { cotas_fallidas++; continue; }
+        a_seccion(m, c->lugar, lugar);
+        if (c->tipo == 1 || c->tipo == 2) {
+            ents[0] = sk_ids[c->ent]; pts[0] = PRO_ENT_WHOLE; n = 1;
+            tipo = c->tipo == 1 ? PRO_TK_DIM_DIA : PRO_TK_DIM_RAD;
+        } else if (c->tipo == 3) {
+            ents[0] = sk_proj[c->ref]; pts[0] = PRO_ENT_WHOLE;
+            ents[1] = sk_ids[c->ent]; pts[1] = c->pt == 'c' ? PRO_ENT_CENTER : c->pt == 's' ? PRO_ENT_START : PRO_ENT_END;
+            n = 2; tipo = PRO_TK_DIM_LINE_POINT;
+        } else if (c->tipo == 4) {
+            ents[0] = sk_proj[c->ref]; pts[0] = PRO_ENT_WHOLE;
+            ents[1] = sk_ids[c->ent]; pts[1] = PRO_ENT_WHOLE;
+            n = 2; tipo = PRO_TK_DIM_LINE_LINE;
+        } else {
+            ents[0] = sk_ids[c->ent]; pts[0] = PRO_ENT_WHOLE;
+            ents[1] = sk_ids[c->ent2]; pts[1] = PRO_ENT_WHOLE;
+            n = 2; tipo = PRO_TK_DIM_LINE_LINE;
+        }
+        if (ProSecdimCreate(sec, ents, pts, n, tipo, lugar, &did) != PRO_TK_NO_ERROR ||
+            ProSecdimValueSet(sec, did, c->valor) != PRO_TK_NO_ERROR) {
+            if (did >= 0) ProSecdimDelete(sec, did);
+            cotas_fallidas++;
+            continue;
+        }
+        if (n_own < MAX_COTAS) own[n_own++] = did;
+    }
     ProSecerrorAlloc(&err);
     *fase = "acotar";
     e = ProSectionAutodim(sec, &err);
-    if (e != PRO_TK_NO_ERROR) errores_seccion_json(&err);
-    if (e == PRO_TK_NO_ERROR) {
-        *fase = "regenerar";
-        e = ProSectionRegenerate(sec, &err);
-        if (e != PRO_TK_NO_ERROR) errores_seccion_json(&err);
+    if (e == PRO_TK_NO_ERROR) { *fase = "regenerar"; e = ProSectionRegenerate(sec, &err); }
+    if (e != PRO_TK_NO_ERROR && n_own > 0) {
+        /* Las cotas del boceto chocan con alguna restriccion que pone Creo: se quitan todas y
+           se acota solo con el acotado automatico (comportamiento de 0.7.x). */
+        ProIntlist ids = NULL;
+        int nd = 0, k;
+        errores_seccion_json(&err);
+        if (ProSecdimIdsGet(sec, &ids, &nd) == PRO_TK_NO_ERROR && ids) {
+            for (k = 0; k < nd; k++) ProSecdimDelete(sec, ids[k]);
+            ProArrayFree((ProArray *)&ids);
+        }
+        ProSecerrorFree(&err);
+        ProSecerrorAlloc(&err);
+        n_own = 0;
+        cotas_estado = "automaticas_por_conflicto";
+        *fase = "acotar";
+        e = ProSectionAutodim(sec, &err);
+        if (e == PRO_TK_NO_ERROR) { *fase = "regenerar"; e = ProSectionRegenerate(sec, &err); }
     }
+    if (e != PRO_TK_NO_ERROR) errores_seccion_json(&err);
     ProSecerrorFree(&err);
+    cotas_propias = n_own;
+    if (e == PRO_TK_NO_ERROR) {
+        /* Cotas finales del croquis y desviacion de la geometria resuelta frente a la pedida */
+        ProIntlist ids = NULL;
+        int nd = 0, k, j;
+        n_cotas_res = 0;
+        if (ProSecdimIdsGet(sec, &ids, &nd) == PRO_TK_NO_ERROR && ids) {
+            for (k = 0; k < nd && n_cotas_res < MAX_COTAS; k++) {
+                ProSecdimType t = PRO_TK_DIM_NONE;
+                double v = 0;
+                ProSecdimTypeGet(sec, ids[k], &t);
+                ProSecdimValueGet(sec, ids[k], &v);
+                cotas_res[n_cotas_res].tipo = (int)t;
+                cotas_res[n_cotas_res].valor = v;
+                cotas_res[n_cotas_res].propia = 0;
+                for (j = 0; j < n_own; j++) if (own[j] == ids[k]) cotas_res[n_cotas_res].propia = 1;
+                n_cotas_res++;
+            }
+            ProArrayFree((ProArray *)&ids);
+        }
+        desviacion_sk = 0;
+        for (i = 0; i < n_sk; i++) {
+            EntSk *x = &sk_ent[i];
+            Pro2dEntdef *d = NULL;
+            double p1[2], p2[2], dv = 0;
+            if (ProSectionEntityGet(sec, sk_ids[i], &d) != PRO_TK_NO_ERROR || d == NULL) continue;
+            if (x->tipo == 1 && d->type == PRO_2D_LINE) {
+                Pro2dLinedef *l = (Pro2dLinedef *)d;
+                double da, db;
+                a_seccion(m, x->v, p1); a_seccion(m, x->v + 3, p2);
+                da = fmax(hypot(l->end1[0] - p1[0], l->end1[1] - p1[1]), hypot(l->end2[0] - p2[0], l->end2[1] - p2[1]));
+                db = fmax(hypot(l->end1[0] - p2[0], l->end1[1] - p2[1]), hypot(l->end2[0] - p1[0], l->end2[1] - p1[1]));
+                dv = da < db ? da : db;
+            } else if (x->tipo == 2 && d->type == PRO_2D_ARC) {
+                Pro2dArcdef *a = (Pro2dArcdef *)d;
+                a_seccion(m, x->v, p1); a_seccion(m, x->v + 3, p2);
+                dv = fmax(hypot(a->center[0] - p1[0], a->center[1] - p1[1]),
+                          fabs(a->radius - hypot(p2[0] - p1[0], p2[1] - p1[1])));
+            } else if (x->tipo == 3 && d->type == PRO_2D_CIRCLE) {
+                Pro2dCircledef *ci = (Pro2dCircledef *)d;
+                a_seccion(m, x->v, p1);
+                dv = fmax(hypot(ci->center[0] - p1[0], ci->center[1] - p1[1]), fabs(ci->radius - x->v[3]));
+            }
+            if (dv > desviacion_sk) desviacion_sk = dv;
+        }
+    }
     return e;
 }
 
@@ -1603,6 +1718,8 @@ static int crear_extrusion(ProMdl mdl, ProElement raiz, int sentido, int probar,
         ProSection sec = NULL;
         ProFeatStatus st = PRO_FEAT_ACTIVE;
         int s_act = intento ? -sentido : sentido;
+        sk_err_txt[0] = '\0';
+        n_cotas_res = 0; cotas_propias = 0; cotas_fallidas = 0; desviacion_sk = -1;
         v0 = volumen_pieza(mdl);
         memset(&feat, 0, sizeof(feat));
         ProArrayAlloc(1, sizeof(ProFeatureCreateOptions), 1, (ProArray *)&opts);
@@ -1690,6 +1807,38 @@ static int crear_extrusion(ProMdl mdl, ProElement raiz, int sentido, int probar,
             j_num("volumen_despues", v1);
             j_num("cambio_volumen", ultimo_delta);
             if (rg.n > 0) { j_num("extension_min", rg.lo); j_num("extension_max", rg.hi); }
+            j_str("cotas_croquis", cotas_estado);
+            j_int("cotas_boceto_creadas", cotas_propias);
+            j_int("cotas_boceto_fallidas", cotas_fallidas);
+            if (desviacion_sk >= 0) j_num("desviacion_croquis_mm", desviacion_sk);
+            if (sk_err_txt[0]) j_str("avisos_croquis", sk_err_txt);
+            j_abrir_lista("cotas");
+            {
+                int k;
+                for (k = 0; k < n_cotas_res; k++) {
+                    const char *tn;
+                    switch (cotas_res[k].tipo) {
+                    case 1: tn = "longitud"; break;
+                    case 2: tn = "punto_recta"; break;
+                    case 3: tn = "radio"; break;
+                    case 4: tn = "diametro"; break;
+                    case 5: tn = "entre_rectas"; break;
+                    case 6: tn = "entre_puntos"; break;
+                    case 7: tn = "entre_puntos_h"; break;
+                    case 8: tn = "entre_puntos_v"; break;
+                    case 11: tn = "angulo_arco"; break;
+                    case 12: tn = "angulo_rectas"; break;
+                    case 13: tn = "recta_arco"; break;
+                    default: tn = "otra"; break;
+                    }
+                    j_abrir_obj();
+                    j_str("tipo", tn);
+                    j_num("valor", cotas_res[k].valor);
+                    j_bool("del_boceto", cotas_res[k].propia);
+                    j_cerrar_obj();
+                }
+            }
+            j_cerrar_lista();
             j_cerrar_obj();
             j_bool("guardado", 0);
             j_cerrar_obj();
@@ -1741,6 +1890,7 @@ static int orden_crear(const char *fichero)
     n_esperados = 0;
     n_sk = 0;
     n_sk_refs = 0;
+    n_cotas = 0;
     f = fopen(fichero ? fichero : "", "r");
     if (!f) { error_json("plan", -1, "No se puede abrir el fichero del plan"); return 2; }
     while (fgets(linea, sizeof(linea), f)) {
@@ -1774,6 +1924,30 @@ static int orden_crear(const char *fichero)
             if (leidos != nv) { lineas_mal++; continue; }
             x->tipo = nv == 6 ? 1 : nv == 12 ? 2 : 3;
             n_sk++;
+            continue;
+        }
+        if (!strcmp(clave, "sk_cota")) {
+            CotaSk *c = &sk_cotas[n_cotas];
+            char sub[8] = "", pt[4] = "";
+            int ok = 0;
+            memset(c, 0, sizeof(*c));
+            if (n_cotas >= MAX_COTAS || sscanf(t, "%*s %7s", sub) != 1) { lineas_mal++; continue; }
+            if (!strcmp(sub, "diam") || !strcmp(sub, "radio")) {
+                c->tipo = sub[0] == 'd' ? 1 : 2;
+                ok = sscanf(t, "%*s %*s %d %lf %lf %lf %lf", &c->ent, &c->valor, &c->lugar[0], &c->lugar[1], &c->lugar[2]) == 5;
+            } else if (!strcmp(sub, "ref")) {
+                c->tipo = 3;
+                ok = sscanf(t, "%*s %*s %d %3s %d %lf %lf %lf %lf", &c->ent, pt, &c->ref, &c->valor,
+                            &c->lugar[0], &c->lugar[1], &c->lugar[2]) == 7 && strchr("cse", pt[0]) && !pt[1];
+                c->pt = pt[0];
+            } else if (!strcmp(sub, "refl")) {
+                c->tipo = 4;
+                ok = sscanf(t, "%*s %*s %d %d %lf %lf %lf %lf", &c->ent, &c->ref, &c->valor, &c->lugar[0], &c->lugar[1], &c->lugar[2]) == 6;
+            } else if (!strcmp(sub, "entre")) {
+                c->tipo = 5;
+                ok = sscanf(t, "%*s %*s %d %d %lf %lf %lf %lf", &c->ent, &c->ent2, &c->valor, &c->lugar[0], &c->lugar[1], &c->lugar[2]) == 6;
+            }
+            if (!ok || c->valor < 0) lineas_mal++; else n_cotas++;
             continue;
         }
         if (!strcmp(clave, "volumen")) { if (sscanf(t, "%*s %lf", &vol_esperado) == 1) comprobacion = 1; else lineas_mal++; continue; }

@@ -147,3 +147,58 @@ async def test_crear_extrusion_pieza_cambiada(tmp_path, fake):
     creo.caras["caras_planas"][1]["punto_plano"] = [0, 25, 0]
     err, msg = await call(srv, "crear_extrusion", codigo=p["codigo"])
     assert err and "ha cambiado" in msg and creo.planes == []
+
+
+# --- cotas del boceto (0.18.0) ----------------------------------------------------------------
+
+HULL = {"tipo": "perfil", "puntos": [[36.6, -6.81469], {"hasta": [36.6, 6.81469], "por": [42, 0]}, [3.428571, 14.602907],
+                                     {"hasta": [-3.428571, 14.602907], "por": [0, 15]}, [-36.6, 6.81469],
+                                     {"hasta": [-36.6, -6.81469], "por": [-42, 0]}, [-3.428571, -14.602907],
+                                     {"hasta": [3.428571, -14.602907], "por": [0, -15]}]}
+VACIA_IAC = {"modelo": {"nombre": "NUEVA"}, "caras_planas": [], "cuerpo_por_defecto": None,
+             "planos_referencia": [{"nombre": "PERFIL", "id": 2, "normal": [1, 0, 0], "origen": [0, 0, 0]},
+                                   {"nombre": "PLANTA", "id": 4, "normal": [0, 1, 0], "origen": [0, 0, 0]},
+                                   {"nombre": "ALZADO", "id": 6, "normal": [0, 0, 1], "origen": [0, 0, 0]}]}
+
+
+def _entidades(plan):
+    return [x.split()[0] for x in plan.splitlines() if x.startswith(("sk_linea", "sk_arco", "sk_circulo"))]
+
+
+def test_cotas_de_la_brida_como_el_dibujo():
+    pl = planificar_extrusion({"tipo": "anadir", "plano": "PLANTA", "profundidad": 10, "sentido": "+Y",
+                               "contornos": [HULL, {"tipo": "circulo", "centro": [-35, 0], "diametro": 6},
+                                             {"tipo": "circulo", "centro": [35, 0], "diametro": 6}]}, VACIA_IAC, "N")
+    # R7, R15 y Ø6 una vez (Creo pone radios iguales y concéntricos); centros de los lóbulos a 35 de PERFIL;
+    # sin ángulos ni puntos de tangencia
+    assert pl["resumen"]["cotas_boceto"] == ["R7", "centro a 35 de PERFIL", "R15", "centro a 35 de PERFIL", "Ø6"]
+    cotas = lineas(pl["plan"], "sk_cota")
+    ents = _entidades(pl["plan"])
+    for c in cotas:
+        t = c.split()
+        if t[1] == "diam":
+            assert ents[int(t[2])] == "sk_circulo"
+        if t[1] == "radio":
+            assert ents[int(t[2])] == "sk_arco"
+    assert plan_valido(pl["plan"])
+
+
+def test_cotas_de_rectangulo_ranura_y_perfil():
+    pl = planificar_extrusion({"tipo": "anadir", "plano": "ALZADO", "profundidad": 10, "sentido": "+Z", "contornos": [
+        {"tipo": "rectangulo", "centro": [0, 0], "ancho": 100, "alto": 60, "radio_esquinas": 5},
+        {"tipo": "ranura", "centro1": [-30, -10], "centro2": [-30, 10], "ancho": 8}]}, VACIA_IAC, "N")
+    assert pl["resumen"]["cotas_boceto"] == ["R5", "100 entre lados", "60 entre lados", "lado a 50 de PERFIL",
+                                             "lado a 30 de PLANTA", "R4", "centro a 30 de PERFIL",
+                                             "centro a 10 de PLANTA", "centro a 10 de PLANTA"]
+    assert plan_valido(pl["plan"])
+    # polígono: vértices que no están en una referencia, cada coordenada una vez
+    pl = planificar_extrusion({"tipo": "anadir", "plano": "ALZADO", "profundidad": 5, "sentido": "+Z", "contornos": [
+        {"tipo": "perfil", "puntos": [[0, 0], [40, 0], [40, 10], [15, 25], [0, 25]]}]}, VACIA_IAC, "N")
+    assert pl["resumen"]["cotas_boceto"] == ["vértice a 40 de PERFIL", "vértice a 10 de PLANTA",
+                                             "vértice a 15 de PERFIL", "vértice a 25 de PLANTA"]
+
+
+def test_arco_por_tres_puntos_redondea_centro_y_radio():
+    from creo_mcp_iac.extrusiones import _arco_3p
+    _, c, r, _, _ = _arco_3p((3.428571, 14.602907), (0, 15), (-3.428571, 14.602907), "x")
+    assert c == (0.0, 0.0) and r == 15.0

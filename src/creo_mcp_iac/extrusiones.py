@@ -58,6 +58,11 @@ def _dist(a, b) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
+def _redondear(x: float) -> float:
+    y = round(x, 3)
+    return y if abs(x - y) < 5e-5 else x
+
+
 # Segmentos: ("L", p, q) o ("A", centro, radio, angulo_inicio, barrido_con_signo)
 
 def _arco_3p(p, m, q, que: str):
@@ -67,8 +72,11 @@ def _arco_3p(p, m, q, que: str):
         raise PlanError(f"{que}: los tres puntos del arco están alineados.")
     ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / d
     uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / d
+    # Los puntos de tangencia llegan redondeados: si el centro o el radio quedan a menos de 5e-5 de un
+    # valor de milésimas, se toma ese valor (el del dibujo) para no acotar 14,99999 en vez de 15.
+    ux, uy = _redondear(ux), _redondear(uy)
     c = (ux, uy)
-    r = _dist(c, p)
+    r = _redondear(_dist(c, p))
     a1 = math.atan2(p[1] - uy, p[0] - ux)
     a2 = math.atan2(q[1] - uy, q[0] - ux)
     ccw = (bx - ax) * (cy - by) - (by - ay) * (cx - bx) > 0
@@ -159,6 +167,7 @@ def _contorno(ct: Any, i: int) -> dict[str, Any]:
                 if _dist(fin, ini) > 1e-9:
                     segs.append(("L", fin, ini))
         desc = f"rectángulo {a:g}×{b:g} de ({x0:g}, {y0:g}) a ({x1:g}, {y1:g})" + (f", R{r:g} en las esquinas" if r > 1e-9 else "")
+        extra = {"x0": x0, "y0": y0, "x1": x1, "y1": y1, "r": r}
     elif tipo == "ranura":
         c1, c2 = _p2(ct.get("centro1"), que + " centro1"), _p2(ct.get("centro2"), que + " centro2")
         w = _pos(ct.get("ancho"), que + " ancho"); r = w / 2
@@ -170,6 +179,7 @@ def _contorno(ct: Any, i: int) -> dict[str, Any]:
         p3 = (c2[0] + r * nx, c2[1] + r * ny); p4 = (c1[0] + r * nx, c1[1] + r * ny)
         segs = [("L", p1, p2), ("A", c2, r, ang - math.pi / 2, math.pi), ("L", p3, p4), ("A", c1, r, ang + math.pi / 2, math.pi)]
         desc = f"ranura de ancho {w:g} entre ({c1[0]:g}, {c1[1]:g}) y ({c2[0]:g}, {c2[1]:g})"
+        extra = {"c1": c1, "c2": c2, "r": r}
     elif tipo == "perfil":
         pts = ct.get("puntos")
         if not isinstance(pts, list) or len(pts) < 2:
@@ -198,11 +208,12 @@ def _contorno(ct: Any, i: int) -> dict[str, Any]:
         if len(segs) < 2 or (len(segs) == 2 and all(s[0] == "L" for s in segs)):
             raise PlanError(f"{que}: el perfil no encierra ningún área.")
         desc = f"perfil de {len(segs)} tramos ({sum(1 for s in segs if s[0] == 'A')} arcos)"
+        extra = {}
     else:
         raise PlanError(f"{que}: tipo 'circulo', 'rectangulo', 'ranura' o 'perfil'.")
     area = sum(_area_seg(s) for s in segs)
     poli = [p for s in segs for p in _puntos_seg(s)]
-    return {"tipo": tipo, "segs": segs, "area": abs(area), "poli": poli, "entidades": len(segs), "desc": desc}
+    return {"tipo": tipo, "segs": segs, "area": abs(area), "poli": poli, "entidades": len(segs), "desc": desc, **extra}
 
 
 def _cruzan(a, b, c, d) -> bool:
@@ -281,6 +292,135 @@ def _plano_croquis(caras: dict[str, Any], plano: int | str) -> dict[str, Any]:
     ejes = [i for i in range(3) if i != k]
     return {"id": pid, "que": que, "normal": [float(x) for x in n], "orientacion": ori, "eje": k,
             "coord": float(o[k]), "ejes_uv": ejes}
+
+
+def _tangente_seg(seg, al_final: bool):
+    """Dirección del tramo en su inicio o en su final."""
+    if seg[0] == "L":
+        d = (seg[2][0] - seg[1][0], seg[2][1] - seg[1][1])
+    else:
+        _, c, r, a1, sw = seg
+        a = a1 + (sw if al_final else 0)
+        sg = 1 if sw > 0 else -1
+        d = (-math.sin(a) * sg, math.cos(a) * sg)
+    n = math.hypot(*d) or 1.0
+    return (d[0] / n, d[1] / n)
+
+
+def _describir_cota(ct: tuple, refs: list[dict[str, Any]]) -> str:
+    if ct[0] == "diam":
+        return f"Ø{ct[2]:g}"
+    if ct[0] == "radio":
+        return f"R{ct[2]:g}"
+    if ct[0] in ("ref", "refl"):
+        ref = ct[3] if ct[0] == "ref" else ct[2]
+        val = ct[4] if ct[0] == "ref" else ct[3]
+        que = {"c": "centro", "s": "vértice", "e": "vértice", None: "lado"}.get(ct[2] if ct[0] == "ref" else None)
+        return f"{que} a {val:g} de {refs[ref].get('nombre')}"
+    return f"{ct[3]:g} entre lados"
+
+
+def _cotas_boceto(cts: list[dict[str, Any]], ejes_ref: dict[int, tuple[int, float]]) -> list[tuple]:
+    """Cotas del boceto como las acotaría un delineante: diámetros y radios, posición de centros y
+    vértices desde los planos de referencia, ancho y alto de los rectángulos. Para no chocar con las
+    restricciones que pone Creo (radios iguales, concéntricos, alineados, tangentes), cada radio y
+    cada coordenada se acota una sola vez y no se acotan los puntos de tangencia ni las coordenadas
+    que caen sobre una referencia. Lo que falte lo completa el acotado automático.
+    Devuelve tuplas (tipo, entidad, ..., valor, lugar_uv)."""
+    radios: set[float] = set()
+    hechas: dict[int, set[float]] = {0: set(), 1: set()}
+    out: list[tuple] = []
+
+    def nuevo_radio(r):
+        k = round(r, 6)
+        if k in radios:
+            return False
+        radios.add(k)
+        return True
+
+    def pos(eje, valor, ent, pt, otro, recta=False):
+        """Cota desde la referencia del eje 0 (u) o 1 (v)."""
+        if eje not in ejes_ref:
+            return
+        ref, origen = ejes_ref[eje]
+        k = round(valor, 6)
+        d = abs(valor - origen)
+        if d < 1e-6 or k in hechas[eje]:
+            return
+        hechas[eje].add(k)
+        lugar = ((valor + origen) / 2, otro + 6) if eje == 0 else (otro + 6, (valor + origen) / 2)
+        out.append(("refl", ent, ref, d, lugar) if recta else ("ref", ent, pt, ref, d, lugar))
+
+    idx = 0
+    for c in cts:
+        segs = c["segs"]
+        base = idx
+        idx += len(segs)
+        if c["tipo"] == "circulo":
+            (cu, cv), r = c["centro"], c["radio"]
+            if nuevo_radio(r):
+                out.append(("diam", base, 2 * r, (cu + 0.9 * r, cv + 0.9 * r)))
+            pos(0, cu, base, "c", cv)
+            pos(1, cv, base, "c", cu)
+            continue
+        if c["tipo"] == "rectangulo":
+            def recta(fijo, eje):
+                for j, sg in enumerate(segs):
+                    if sg[0] == "L" and abs(sg[1][eje] - fijo) < 1e-9 and abs(sg[2][eje] - fijo) < 1e-9:
+                        return base + j
+                return None
+            iz, de = recta(c["x0"], 0), recta(c["x1"], 0)
+            ab, ar = recta(c["y0"], 1), recta(c["y1"], 1)
+            if c["r"] > 1e-9:
+                j = next(j for j, sg in enumerate(segs) if sg[0] == "A")
+                if nuevo_radio(c["r"]):
+                    sg = segs[j]
+                    out.append(("radio", base + j, c["r"], (sg[1][0] + 1.5 * c["r"], sg[1][1] - 1.5 * c["r"])))
+            if iz is not None and de is not None:
+                out.append(("entre", iz, de, c["x1"] - c["x0"], ((c["x0"] + c["x1"]) / 2, c["y1"] + 8)))
+            if ab is not None and ar is not None:
+                out.append(("entre", ab, ar, c["y1"] - c["y0"], (c["x1"] + 8, (c["y0"] + c["y1"]) / 2)))
+            if iz is not None:
+                pos(0, c["x0"], iz, None, (c["y0"] + c["y1"]) / 2, recta=True)
+            if ab is not None:
+                pos(1, c["y0"], ab, None, (c["x0"] + c["x1"]) / 2, recta=True)
+            hechas[0].add(round(c["x1"], 6))
+            hechas[1].add(round(c["y1"], 6))
+            continue
+        if c["tipo"] == "ranura":
+            js = [j for j, sg in enumerate(segs) if sg[0] == "A"]
+            if nuevo_radio(c["r"]):
+                sg = segs[js[0]]
+                out.append(("radio", base + js[0], c["r"], (sg[1][0] + 1.5 * c["r"], sg[1][1] + 1.5 * c["r"])))
+            for j in js:
+                cc = segs[j][1]
+                pos(0, cc[0], base + j, "c", cc[1])
+                pos(1, cc[1], base + j, "c", cc[0])
+            continue
+        # perfil: radio y centro de cada arco; vértices que no son de tangencia
+        n = len(segs)
+        for j, sg in enumerate(segs):
+            if sg[0] == "A":
+                _, cc, r, a1, sw = sg
+                if nuevo_radio(r):
+                    am = a1 + sw / 2
+                    out.append(("radio", base + j, r, (cc[0] + 1.3 * r * math.cos(am), cc[1] + 1.3 * r * math.sin(am))))
+                pos(0, cc[0], base + j, "c", cc[1])
+                pos(1, cc[1], base + j, "c", cc[0])
+        for j in range(n):
+            a, b = segs[j - 1], segs[j]            # vértice entre a (que acaba) y b (que empieza)
+            ta, tb = _tangente_seg(a, True), _tangente_seg(b, False)
+            if (a[0] == "A" or b[0] == "A") and abs(ta[0] * tb[1] - ta[1] * tb[0]) < 1e-6 and ta[0] * tb[0] + ta[1] * tb[1] > 0:
+                continue                           # punto de tangencia: lo fija la tangencia
+            if b[0] == "L":
+                ent, pt, p = base + j, "s", b[1]
+            elif a[0] == "L":
+                ent, pt, p = base + (j - 1) % n, "e", a[2]
+            else:
+                continue                           # entre dos arcos sin tangencia: acotado automático
+            pos(0, p[0], ent, pt, p[1])
+            pos(1, p[1], ent, pt, p[0])
+    return out
 
 
 def planificar_extrusion(peticion: dict[str, Any], caras: dict[str, Any], nombre: str) -> dict[str, Any]:
@@ -370,6 +510,26 @@ def planificar_extrusion(peticion: dict[str, Any], caras: dict[str, Any], nombre
     lineas = [f"modelo {modelo}", *e]
     lineas += [f"sk_ref 5 {r['id']}" for r in refs]
     lineas += sk
+    # referencia que mide cada coordenada del croquis (u, v): plano normal a ese eje
+    ejes_ref: dict[int, tuple[int, float]] = {}
+    for i_r, r in enumerate(refs):
+        nr, orr = r.get("normal"), r.get("origen")
+        if not nr or not orr:
+            continue
+        for e_i, k_uv in enumerate((u, v)):
+            if abs(abs(nr[k_uv]) - 1) < 1e-9 and e_i not in ejes_ref:
+                ejes_ref[e_i] = (i_r, float(orr[k_uv]))
+    cotas = _cotas_boceto(cts, ejes_ref)
+    for ct in cotas:
+        lugar = fmt(p3(ct[-1]))
+        if ct[0] in ("diam", "radio"):
+            lineas.append(f"sk_cota {ct[0]} {ct[1]} {ct[2]:.6f} {lugar}")
+        elif ct[0] == "ref":
+            lineas.append(f"sk_cota ref {ct[1]} {ct[2]} {ct[3]} {ct[4]:.6f} {lugar}")
+        elif ct[0] == "refl":
+            lineas.append(f"sk_cota refl {ct[1]} {ct[2]} {ct[3]:.6f} {lugar}")
+        else:
+            lineas.append(f"sk_cota entre {ct[1]} {ct[2]} {ct[3]:.6f} {lugar}")
     vol = area * prof if prof else None
     if ext in ("ciega", "pasante"):
         mas = sentido.startswith("+")
@@ -407,6 +567,7 @@ def planificar_extrusion(peticion: dict[str, Any], caras: dict[str, Any], nombre
                       "pasante a los dos lados"),
         "volumen_teorico_mm3": round(vol, 3) if vol else None,
         "referencias_croquis": [r.get("nombre") for r in refs],
+        "cotas_boceto": [_describir_cota(ct, refs) for ct in cotas],
     }
     return {"plan": "\n".join(lineas) + "\n", "resumen": resumen, "avisos": avisos,
             "ids_caras": [pl["id"]] if any(x["id"] == pl["id"] for x in planas) else [],

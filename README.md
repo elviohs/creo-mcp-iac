@@ -15,7 +15,7 @@ Asistente ──stdio──▶ creo-mcp-iac ──HTTP localhost──▶ CREOSO
   nativas, operaciones de taladro, caras, aristas y selección, y creación de taladros, patrones,
   redondeos, chaflanes, extrusiones y cortes con croquis.
 
-Versión 0.17.1. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nativo:
+Versión 0.18.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nativo:
 [`native/README.md`](native/README.md).
 
 ## Principios
@@ -111,9 +111,18 @@ y prueba el otro sentido.
 Para levantar una pieza nueva: el usuario crea en Creo una pieza vacía con la plantilla del IAC y la
 deja abierta; se hace el contorno exterior y después cortes, taladros, redondeos y chaflanes, cada
 uno con su tabla y su confirmación. De un boceto o una foto solo se toman las cotas que el usuario
-confirma. Las cotas del croquis las pone Creo (acotado automático) y las redondea a sus decimales
-(en la prueba, un arco quedó a 0,001 mm de su punto): conviene revisarlas o sustituirlas en Creo si
-la pieza va a cambiar o lleva tolerancias finas.
+confirma.
+
+Desde 0.18.0 (`creo_iac_tk` 0.8.0) el croquis se acota con las **cotas del boceto**, como lo haría un
+delineante: diámetros y radios, posición de centros y vértices desde los planos de referencia, ancho
+y alto de los rectángulos. Para no chocar con las restricciones que Creo pone solo (radios iguales,
+concéntricos, alineados, tangentes), cada radio y cada coordenada se acota una vez y no se acotan
+los puntos de tangencia ni lo que cae sobre una referencia; lo que falte lo completa el acotado
+automático. Si aun así chocan, se quitan y el croquis queda con el acotado automático (como en
+0.17), y la respuesta lo dice (`cotas_croquis`). La respuesta trae las cotas que quedaron en Creo
+(las del boceto marcadas) y la desviación de la geometría resuelta frente a la pedida
+(`desviacion_croquis_mm`). Los arcos por tres puntos redondean centro y radio a la milésima si
+están a menos de 5·10⁻⁵ (puntos de tangencia dados con decimales).
 
 ## Holguras y criogenia
 

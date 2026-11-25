@@ -109,6 +109,11 @@ rango Z 0 10                     # las caras de la operación deben quedar en es
 volumen_max 53326.5              # cambio de volumen con ese signo y como mucho ese valor (exacto si la pieza estaba vacía)
 volumen_signo -1                 # solo el signo (cortes pasantes)
 volumen 100                      # cambio exacto
+sk_cota diam 8 6 x y z           # 0.8.0: cotas fuertes del boceto (entidad por su orden en sk_*,
+sk_cota radio 0 7 x y z          #   valor y punto de colocación); ref: punto c/s/e de la entidad a
+sk_cota ref 0 c 0 35 x y z       #   la referencia sk_ref n.º 0; refl: recta a referencia;
+sk_cota refl 3 0 50 x y z        #   entre: distancia entre dos rectas. Después, acotado automático;
+sk_cota entre 1 5 100 x y z      #   si choca, se quitan y queda solo el automático
 ```
 
 Tipos de valor: `i` entero, `d` real, `b` booleano, `w` texto, `r` referencia, `k` colección de
