@@ -1,3 +1,3 @@
 """MCP de solo lectura para Creo Parametric sobre creopyson/CREOSON (IAC)."""
 
-__version__ = "0.16.1"
+__version__ = "0.17.1"

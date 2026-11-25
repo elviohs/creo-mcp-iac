@@ -67,10 +67,14 @@
 #include "ProCrvcollection.h"
 #include "ProCollect.h"
 #include "ProMaterial.h"
+#include "ProElempath.h"
+#include "ProSection.h"
+#include "ProSecerror.h"
+#include "Pro2dEntdef.h"
 #include <time.h>
 #include "salida.h"
 
-#define VERSION_TK "0.6.3"
+#define VERSION_TK "0.7.1"
 #define MAX_MODELOS 20000
 
 static ProProcessHandle sesion;
@@ -1408,6 +1412,316 @@ static int crear_patron(ProMdl mdl, ProElement raiz, int id_guia, const double *
     return 5;
 }
 
+/* -------------------------------------------- extrusiones (crear con croquis) */
+
+#ifndef PI
+#define PI 3.14159265358979323846
+#endif
+#define MAX_SK 400
+typedef struct { int tipo; double v[12]; } EntSk;   /* 1 linea, 2 arco, 3 circulo */
+static EntSk sk_ent[MAX_SK];
+static int n_sk = 0;
+static int sk_refs[8][2];
+static int n_sk_refs = 0;
+
+/* Punto del modelo -> coordenadas 2D de la seccion (matriz seccion -> modelo, por filas). */
+static void a_seccion(ProMatrix m, const double *p, double *uv)
+{
+    int k;
+    double d[3], n0 = 0, n1 = 0;
+    for (k = 0; k < 3; k++) { d[k] = p[k] - m[3][k]; n0 += m[0][k] * m[0][k]; n1 += m[1][k] * m[1][k]; }
+    uv[0] = (d[0] * m[0][0] + d[1] * m[0][1] + d[2] * m[0][2]) / (n0 > 0 ? n0 : 1);
+    uv[1] = (d[0] * m[1][0] + d[1] * m[1][1] + d[2] * m[1][2]) / (n1 > 0 ? n1 : 1);
+}
+
+static double volumen_pieza(ProMdl mdl)
+{
+    ProMassProperty mp;
+    memset(&mp, 0, sizeof(mp));
+    if (ProSolidMassPropertyGet((ProSolid)mdl, NULL, &mp) != PRO_TK_NO_ERROR) return -1.0;
+    return mp.volume;
+}
+
+/* Mensajes de error del croquis (se anaden al texto del error) */
+static char sk_err_txt[700];
+static void errores_seccion_json(ProWSecerror *err)
+{
+    int n = 0, i;
+    ProMsg msg;
+    char u8[300];
+    if (ProSecerrorCount(err, &n) != PRO_TK_NO_ERROR || n <= 0) return;
+    for (i = 0; i < n && i < 5; i++) {
+        msg[0] = L'\0';
+        ProSecerrorMsgGet(*err, i, msg);
+        u8[0] = '\0';
+        a_utf8(msg, u8, (int)sizeof(u8));
+        if (strlen(sk_err_txt) + strlen(u8) + 4 < sizeof(sk_err_txt)) {
+            if (sk_err_txt[0]) strcat(sk_err_txt, " | ");
+            strcat(sk_err_txt, u8);
+        }
+    }
+}
+
+/* Rellena la seccion de la operacion incompleta: proyecta las referencias, anade las
+   entidades (en coordenadas del modelo), acota automaticamente y resuelve. */
+static ProError construir_seccion(ProMdl mdl, ProSection sec, const char **fase)
+{
+    ProMatrix m;
+    ProWSecerror err = NULL;
+    ProError e;
+    int i, id;
+    *fase = "situacion";
+    if ((e = ProSectionLocationGet(sec, m)) != PRO_TK_NO_ERROR) return e;
+    *fase = "referencias";
+    for (i = 0; i < n_sk_refs; i++) {
+        ProModelitem it;
+        ProSelection sel = NULL;
+        if (ProModelitemInit(mdl, sk_refs[i][1], (ProType)sk_refs[i][0], &it) != PRO_TK_NO_ERROR ||
+            ProSelectionAlloc(NULL, &it, &sel) != PRO_TK_NO_ERROR) return PRO_TK_BAD_INPUTS;
+        e = ProSectionEntityFromProjection(sec, sel, &id);
+        ProSelectionFree(&sel);
+        if (e != PRO_TK_NO_ERROR) return e;
+    }
+    *fase = "entidades";
+    for (i = 0; i < n_sk; i++) {
+        EntSk *x = &sk_ent[i];
+        if (x->tipo == 1) {
+            Pro2dLinedef l;
+            l.type = PRO_2D_LINE;
+            a_seccion(m, x->v, l.end1);
+            a_seccion(m, x->v + 3, l.end2);
+            e = ProSectionEntityAdd(sec, (Pro2dEntdef *)&l, &id);
+        } else if (x->tipo == 2) {
+            Pro2dArcdef a;
+            double c[2], s2[2], e2[2], m2[2], a1, a2, am, r;
+            a_seccion(m, x->v, c); a_seccion(m, x->v + 3, s2); a_seccion(m, x->v + 6, e2); a_seccion(m, x->v + 9, m2);
+            r = sqrt((s2[0] - c[0]) * (s2[0] - c[0]) + (s2[1] - c[1]) * (s2[1] - c[1]));
+            a1 = atan2(s2[1] - c[1], s2[0] - c[0]);
+            a2 = atan2(e2[1] - c[1], e2[0] - c[0]);
+            am = atan2(m2[1] - c[1], m2[0] - c[0]);
+            /* sentido antihorario de a1 a a2; si el punto medio no esta en ese tramo, al reves */
+            while (a2 <= a1) a2 += 2 * PI;
+            while (am < a1) am += 2 * PI;
+            if (am > a2) { double t = a1; a1 = a2 - 2 * PI; a2 = t; while (a2 <= a1) a2 += 2 * PI; }
+            a.type = PRO_2D_ARC;
+            a.center[0] = c[0]; a.center[1] = c[1];
+            a.start_angle = a1; a.end_angle = a2; a.radius = r;
+            e = ProSectionEntityAdd(sec, (Pro2dEntdef *)&a, &id);
+        } else {
+            Pro2dCircledef ci;
+            ci.type = PRO_2D_CIRCLE;
+            a_seccion(m, x->v, ci.center);
+            ci.radius = x->v[3];
+            e = ProSectionEntityAdd(sec, (Pro2dEntdef *)&ci, &id);
+        }
+        if (e != PRO_TK_NO_ERROR) return e;
+    }
+    /* Como en Ug3DSection.c: acotado automatico y regenerar (ProSectionAutodim ya resuelve;
+       ProSectionSolve despues devuelve PRO_TK_BAD_INPUTS, visto el 2026-11-25). */
+    ProSecerrorAlloc(&err);
+    *fase = "acotar";
+    e = ProSectionAutodim(sec, &err);
+    if (e != PRO_TK_NO_ERROR) errores_seccion_json(&err);
+    if (e == PRO_TK_NO_ERROR) {
+        *fase = "regenerar";
+        e = ProSectionRegenerate(sec, &err);
+        if (e != PRO_TK_NO_ERROR) errores_seccion_json(&err);
+    }
+    ProSecerrorFree(&err);
+    return e;
+}
+
+/* Fija un entero de primer nivel del arbol extraido (lo crea si falta). */
+static ProError fijar_entero_arbol(ProElement arbol, int elem_id, int valor)
+{
+    ProElempath path = NULL;
+    ProElempathItem it[1];
+    ProElement el = NULL;
+    ProError e;
+    it[0].type = PRO_ELEM_PATH_ITEM_TYPE_ID; it[0].path_item.elem_id = elem_id;
+    ProElempathAlloc(&path);
+    ProElempathDataSet(path, it, 1);
+    e = ProElemtreeElementGet(arbol, path, &el);
+    ProElempathFree(&path);
+    if (e != PRO_TK_NO_ERROR || el == NULL) {
+        if ((e = ProElementAlloc((ProElemId)elem_id, &el)) != PRO_TK_NO_ERROR) return e;
+        if ((e = ProElementIntegerSet(el, valor)) != PRO_TK_NO_ERROR) return e;
+        return ProElemtreeElementAdd(arbol, NULL, el);
+    }
+    return ProElementIntegerSet(el, valor);
+}
+
+/* Extension de las caras creadas por la operacion a lo largo de un eje del modelo. */
+typedef struct { int eje; double lo, hi; int n; } RangoOp;
+static ProError visita_cara_rango(ProGeomitem *it, ProError st, ProAppData d)
+{
+    RangoOp *r = (RangoOp *)d;
+    ProSurface s = NULL;
+    ProGeomitemdata *gd = NULL;
+    if (ProGeomitemToSurface(it, &s) != PRO_TK_NO_ERROR) return PRO_TK_NO_ERROR;
+    if (ProSurfaceDataGet(s, &gd) == PRO_TK_NO_ERROR && gd != NULL && gd->data.p_surface_data != NULL) {
+        ProSurfacedata *sd = gd->data.p_surface_data;
+        double a = sd->xyz_min[r->eje], b = sd->xyz_max[r->eje];
+        if (a > b) { double t = a; a = b; b = t; }
+        if (r->n == 0 || a < r->lo) r->lo = a;
+        if (r->n == 0 || b > r->hi) r->hi = b;
+        r->n++;
+        ProGeomitemdataFree(&gd);
+    }
+    return PRO_TK_NO_ERROR;
+}
+
+/* sentido: 0 = el de Creo; -1/1 = PRO_E_STD_DIRECTION. probar: reintenta con el contrario.
+   lado: 0 = el de Creo; 1/2 = PRO_E_STD_MATRLSIDE.
+   comprobacion: 0 ninguna, 1 volumen exacto (vol_esperado, con signo), 2 solo signo (vol_esperado = -1/1),
+   3 como mucho |vol_esperado| con su signo (exacto si la pieza estaba vacia).
+   eje_r >= 0: las caras de la operacion deben quedar entre r_min y r_max en ese eje (comprueba el sentido). */
+static int crear_extrusion(ProMdl mdl, ProElement raiz, int sentido, int probar, int lado,
+                           int comprobacion, double vol_esperado, int eje_r, double r_min, double r_max)
+{
+    RangoOp rg;
+    ProModelitem mi;
+    ProSelection msel = NULL;
+    ProAsmcomppath cp;
+    int intento, max_intentos = (probar && sentido != 0) ? 2 : 1;
+    double ultimo_delta = 0, v0 = -1, v1 = -1;
+    ProError ultimo = PRO_TK_GENERAL_ERROR;
+    const char *fase = "crear";
+
+    memset(&rg, 0, sizeof(rg));
+    sk_err_txt[0] = '\0';
+    ProMdlToModelitem(mdl, &mi);
+    ProSelectionAlloc(NULL, &mi, &msel);
+    ProSelectionAsmcomppathGet(msel, &cp);
+    for (intento = 0; intento < max_intentos; intento++) {
+        ProFeature feat;
+        ProErrorlist errs;
+        ProFeatureCreateOptions *opts = NULL;
+        ProElement arbol = NULL, sk = NULL;
+        ProElempath path = NULL;
+        ProElempathItem items[2];
+        ProSection sec = NULL;
+        ProFeatStatus st = PRO_FEAT_ACTIVE;
+        int s_act = intento ? -sentido : sentido;
+        v0 = volumen_pieza(mdl);
+        memset(&feat, 0, sizeof(feat));
+        ProArrayAlloc(1, sizeof(ProFeatureCreateOptions), 1, (ProArray *)&opts);
+        opts[0] = PRO_FEAT_CR_INCOMPLETE_FEAT;
+        fase = "crear";
+        ultimo = ProFeatureWithoptionsCreate(msel, raiz, opts, PRO_REGEN_NO_FLAGS, &feat, &errs);
+        ProArrayFree((ProArray *)&opts);
+        if (ultimo != PRO_TK_NO_ERROR) { if (feat.id > 0) borrar_ids((ProSolid)mdl, &feat.id, 1); break; }
+        fase = "arbol";
+        ultimo = ProFeatureElemtreeExtract(&feat, NULL, PRO_FEAT_EXTRACT_NO_OPTS, &arbol);
+        if (ultimo == PRO_TK_NO_ERROR) {
+            items[0].type = PRO_ELEM_PATH_ITEM_TYPE_ID; items[0].path_item.elem_id = PRO_E_STD_SECTION;
+            items[1].type = PRO_ELEM_PATH_ITEM_TYPE_ID; items[1].path_item.elem_id = PRO_E_SKETCHER;
+            ProElempathAlloc(&path);
+            ProElempathDataSet(path, items, 2);
+            fase = "croquis";
+            ultimo = ProElemtreeElementGet(arbol, path, &sk);
+            if (ultimo == PRO_TK_NO_ERROR) ultimo = ProElementSpecialvalueGet(sk, NULL, (ProAppData *)&sec);
+            ProElempathFree(&path);
+        }
+        if (ultimo == PRO_TK_NO_ERROR) ultimo = construir_seccion(mdl, sec, &fase);
+        /* sentido y lado del material: solo cuentan con la seccion ya definida (ProExtrude.h, nota 3) */
+        if (ultimo == PRO_TK_NO_ERROR && lado) { fase = "lado_material"; ultimo = fijar_entero_arbol(arbol, PRO_E_STD_MATRLSIDE, lado); }
+        if (ultimo == PRO_TK_NO_ERROR && s_act) { fase = "sentido"; ultimo = fijar_entero_arbol(arbol, PRO_E_STD_DIRECTION, s_act); }
+        if (ultimo == PRO_TK_NO_ERROR) {
+            ProArrayAlloc(1, sizeof(ProFeatureCreateOptions), 1, (ProArray *)&opts);
+            opts[0] = PRO_FEAT_CR_DEFINE_MISS_ELEMS;
+            fase = "completar";
+            ultimo = ProFeatureWithoptionsRedefine(&cp, &feat, arbol, opts, PRO_REGEN_NO_FLAGS, &errs);
+            ProArrayFree((ProArray *)&opts);
+        }
+        if (arbol) ProFeatureElemtreeFree(&feat, arbol);
+        if (ultimo == PRO_TK_NO_ERROR) { ProFeatureStatusGet(&feat, &st); if (st != PRO_FEAT_ACTIVE) { ultimo = PRO_TK_GENERAL_ERROR; fase = "completar"; } }
+        if (ultimo != PRO_TK_NO_ERROR) {
+            int fid = feat.id;
+            if (fid > 0) borrar_ids((ProSolid)mdl, &fid, 1);
+            /* un error del croquis no se arregla cambiando el sentido */
+            if (strcmp(fase, "completar") != 0) break;
+            continue;
+        }
+        v1 = volumen_pieza(mdl);
+        ultimo_delta = (v0 >= 0 && v1 >= 0) ? v1 - v0 : 0;
+        memset(&rg, 0, sizeof(rg));
+        if (eje_r >= 0 && eje_r <= 2) {
+            double tol = 2e-3;
+            rg.eje = eje_r;
+            ProFeatureGeomitemVisit(&feat, PRO_SURFACE, visita_cara_rango, NULL, (ProAppData)&rg);
+            if (rg.n == 0 || rg.lo < r_min - tol || rg.hi > r_max + tol) {
+                int fid = feat.id;
+                borrar_ids((ProSolid)mdl, &fid, 1);
+                ultimo = PRO_TK_GENERAL_ERROR;
+                fase = "sentido_incorrecto";
+                continue;
+            }
+        }
+        if (comprobacion && v1 >= 0) {
+            int mal;
+            if (v0 < 0) { v0 = 0; ultimo_delta = v1; }   /* primera operacion de una pieza vacia */
+            if (comprobacion == 1 || (comprobacion == 3 && v0 <= 1e-9))
+                mal = fabs(ultimo_delta - vol_esperado) > 0.02 * fabs(vol_esperado) + 0.01;
+            else if (comprobacion == 3)
+                mal = (vol_esperado > 0 ? ultimo_delta <= 1e-6 : ultimo_delta >= -1e-6) ||
+                      fabs(ultimo_delta) > 1.02 * fabs(vol_esperado) + 0.01;
+            else mal = (vol_esperado > 0) ? ultimo_delta <= 1e-6 : ultimo_delta >= -1e-6;
+            if (mal) {
+                int fid = feat.id;
+                borrar_ids((ProSolid)mdl, &fid, 1);
+                ultimo = PRO_TK_GENERAL_ERROR;
+                fase = "verificacion";
+                continue;
+            }
+        }
+        {
+            ProName nombre;
+            nombre[0] = L'\0';
+            ProModelitemNameGet((ProModelitem *)&feat, nombre);
+            cabecera_ok();
+            modelo_json("modelo", mdl);
+            j_clave_obj("operacion");
+            j_int("id", feat.id);
+            j_wstr("nombre", nombre);
+            j_int("intentos", intento + 1);
+            j_int("sentido", s_act);
+            j_num("volumen_antes", v0);
+            j_num("volumen_despues", v1);
+            j_num("cambio_volumen", ultimo_delta);
+            if (rg.n > 0) { j_num("extension_min", rg.lo); j_num("extension_max", rg.hi); }
+            j_cerrar_obj();
+            j_bool("guardado", 0);
+            j_cerrar_obj();
+            j_fin();
+        }
+        ProSelectionFree(&msel); ProElementFree(&raiz);
+        return 0;
+    }
+    ProSelectionFree(&msel); ProElementFree(&raiz);
+    if (!strcmp(fase, "sentido_incorrecto")) {
+        char txt[240];
+        sprintf(txt, "La operacion no queda donde se esperaba en el eje %c (%.3f a %.3f frente a %.3f a %.3f)%s: "
+                "no se ha creado", "XYZ"[eje_r], rg.lo, rg.hi, r_min, r_max, max_intentos > 1 ? " en ningun sentido" : "");
+        error_json("verificacion", 0, txt);
+    } else if (!strcmp(fase, "verificacion")) {
+        char txt[240];
+        if (comprobacion == 1)
+            sprintf(txt, "La extrusion no cambia el volumen como se esperaba (%.3f frente a %.3f mm3)%s: no se ha creado",
+                    ultimo_delta, vol_esperado, max_intentos > 1 ? " en ningun sentido" : "");
+        else
+            sprintf(txt, "La operacion no %s material (cambio de volumen %.3f mm3)%s: no se ha creado",
+                    vol_esperado > 0 ? "anade" : "quita", ultimo_delta, max_intentos > 1 ? " en ningun sentido" : "");
+        error_json("verificacion", 0, txt);
+    } else {
+        char txt[900];
+        sprintf(txt, "Creo no ha podido crear la extrusion (fase: %s)%s%s; no se ha creado nada", fase,
+                sk_err_txt[0] ? ". Croquis: " : "", sk_err_txt);
+        error_json(fase, (int)ultimo, txt);
+    }
+    return 5;
+}
+
 static int orden_crear(const char *fichero)
 {
     FILE *f;
@@ -1415,6 +1729,9 @@ static int orden_crear(const char *fichero)
     char alt1[160] = "", alt2[160] = "", ai1[160] = "", ai2[160] = "";
     double objetivo[3] = {0, 0, 0}, direccion[3] = {0, 0, 0};
     int verificar = 0, id_patron = 0;
+    double vol_esperado = 0;
+    int sentido = 0, probar_sentidos = 0, lado_mat = 0, comprobacion = 0, eje_r = -1;
+    double r_min = 0, r_max = 0;
     int sin_aristas[64], n_sin_aristas = 0;
     ProElement raiz = NULL;
     ProMdl mdl;
@@ -1422,6 +1739,8 @@ static int orden_crear(const char *fichero)
 
     n_nodos = 0;
     n_esperados = 0;
+    n_sk = 0;
+    n_sk_refs = 0;
     f = fopen(fichero ? fichero : "", "r");
     if (!f) { error_json("plan", -1, "No se puede abrir el fichero del plan"); return 2; }
     while (fgets(linea, sizeof(linea), f)) {
@@ -1441,6 +1760,44 @@ static int orden_crear(const char *fichero)
             continue;
         }
         if (!strcmp(clave, "patron")) { if (sscanf(t, "%*s %d", &id_patron) != 1) lineas_mal++; continue; }
+        if (!strcmp(clave, "sk_ref")) {
+            if (n_sk_refs >= 8 || sscanf(t, "%*s %d %d", &sk_refs[n_sk_refs][0], &sk_refs[n_sk_refs][1]) != 2) lineas_mal++;
+            else n_sk_refs++;
+            continue;
+        }
+        if (!strcmp(clave, "sk_linea") || !strcmp(clave, "sk_arco") || !strcmp(clave, "sk_circulo")) {
+            EntSk *x = &sk_ent[n_sk];
+            int nv = !strcmp(clave, "sk_linea") ? 6 : !strcmp(clave, "sk_arco") ? 12 : 4, leidos = 0, k, us;
+            const char *q = t + strlen(clave);
+            if (n_sk >= MAX_SK) { lineas_mal++; continue; }
+            for (k = 0; k < nv; k++) { if (sscanf(q, "%lf%n", &x->v[k], &us) != 1) break; q += us; leidos++; }
+            if (leidos != nv) { lineas_mal++; continue; }
+            x->tipo = nv == 6 ? 1 : nv == 12 ? 2 : 3;
+            n_sk++;
+            continue;
+        }
+        if (!strcmp(clave, "volumen")) { if (sscanf(t, "%*s %lf", &vol_esperado) == 1) comprobacion = 1; else lineas_mal++; continue; }
+        if (!strcmp(clave, "volumen_signo")) {
+            int sg;
+            if (sscanf(t, "%*s %d", &sg) == 1 && (sg == 1 || sg == -1)) { comprobacion = 2; vol_esperado = sg; } else lineas_mal++;
+            continue;
+        }
+        if (!strcmp(clave, "sentido")) {
+            if (sscanf(t, "%*s %d", &sentido) != 1 || (sentido != 1 && sentido != -1 && sentido != 0)) lineas_mal++;
+            continue;
+        }
+        if (!strcmp(clave, "probar_sentidos")) { probar_sentidos = 1; continue; }
+        if (!strcmp(clave, "volumen_max")) { if (sscanf(t, "%*s %lf", &vol_esperado) == 1 && vol_esperado != 0) comprobacion = 3; else lineas_mal++; continue; }
+        if (!strcmp(clave, "rango")) {
+            char ej[4];
+            if (sscanf(t, "%*s %3s %lf %lf", ej, &r_min, &r_max) != 3 || !ej[0] || !strchr("XYZ", ej[0]) || ej[1] || r_min >= r_max) lineas_mal++;
+            else eje_r = ej[0] - 'X';
+            continue;
+        }
+        if (!strcmp(clave, "lado_material")) {
+            if (sscanf(t, "%*s %d", &lado_mat) != 1 || lado_mat < 0 || lado_mat > 3) lineas_mal++;
+            continue;
+        }
         if (!strcmp(clave, "esperado")) {
             if (n_esperados >= MAX_ESPERADOS ||
                 sscanf(t, "%*s %lf %lf %lf", &esperados[n_esperados][0], &esperados[n_esperados][1],
@@ -1528,6 +1885,7 @@ static int orden_crear(const char *fichero)
     }
     if (!modelo_objetivo(modelo, &mdl)) return 4;
     if (id_patron > 0) return crear_patron(mdl, raiz, id_patron, direccion, ai1, ai2);
+    if (n_sk > 0) return crear_extrusion(mdl, raiz, sentido, probar_sentidos, lado_mat, comprobacion, vol_esperado, eje_r, r_min, r_max);
     if (serie[0]) {
         wchar_t w[64];
         ProStringToWstring(w, serie);

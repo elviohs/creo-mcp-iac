@@ -13,9 +13,9 @@ Asistente ──stdio──▶ creo-mcp-iac ──HTTP localhost──▶ CREOSO
 - **CREOSON** (creopyson): lectura de modelos, planos, BOM y masas; exportación STEP/PDF.
 - **Programa propio en C con Creo Toolkit** (`native/`): lo que CREOSON no hace — interferencias
   nativas, operaciones de taladro, caras, aristas y selección, y creación de taladros, patrones,
-  redondeos y chaflanes.
+  redondeos, chaflanes, extrusiones y cortes con croquis.
 
-Versión 0.16.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nativo:
+Versión 0.17.1. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nativo:
 [`native/README.md`](native/README.md).
 
 ## Principios
@@ -52,9 +52,10 @@ Versión 0.16.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nati
 | `aristas_creo` | Aristas con sus caras, punto medio, dirección y si son cóncavas (esquina interior) o convexas | No |
 | `proponer_redondeos` / `crear_redondeos` | Redondeo de radio constante en las aristas elegidas (p. ej. esquinas interiores que la fresa no puede dejar vivas) | Redondeo `IA_RED_*`, sin guardar |
 | `proponer_chaflanes` / `crear_chaflanes` | Chaflán de distancia constante (45×D o D×D) en las aristas elegidas (romper aristas vivas, entradas de taladros y ejes) | Chaflán `IA_CHF_*`, sin guardar |
+| `proponer_extrusion` / `crear_extrusion` | Extrusión (añade material) o corte (quita) con un croquis de círculos, rectángulos, ranuras y perfiles de rectas y arcos, en un plano o cara normal a X, Y o Z; ciega, simétrica o pasante | Operación `IA_EXT_*` o `IA_CORTE_*`, sin guardar |
 | `taladros_conjugados` | Taladros enfrentados de piezas distintas en un conjunto: alineación frente a la holgura del tornillo y tamaños compatibles (roscado M6 con holgura M6) | Solo un fichero nuevo |
 | `holguras_creo` | Holguras mínimas entre piezas (distancia exacta de Creo) y estimación en frío por contracción de los materiales | Solo un fichero nuevo |
-| `borrar_operaciones_ia` | Deshace operaciones, patrones, redondeos y chaflanes `IA_*` | Borra `IA_*`, sin guardar |
+| `borrar_operaciones_ia` | Deshace operaciones, patrones, redondeos, chaflanes, extrusiones y cortes `IA_*` | Borra `IA_*`, sin guardar |
 | `resultado_tarea`, `listar_tareas` | Recoger el resultado de herramientas largas | No |
 
 Las herramientas largas (exportaciones, BOM, masas, estándares, interferencias, taladros) responden
@@ -90,6 +91,30 @@ Los chaflanes siguen el mismo camino: `proponer_chaflanes` (distancia D, esquema
 habitual, «Ch D×45°»— o D×D; normalmente en aristas exteriores, avisa si alguna es interior) y
 `crear_chaflanes`.
 
+## Piezas desde un boceto: extrusiones y cortes
+
+`proponer_extrusion` prepara una extrusión (`tipo="anadir"`) o un corte (`tipo="quitar"`) con un
+croquis en un plano de referencia o en una cara plana normal a X, Y o Z. Las coordenadas del
+croquis son las de la pieza en ese plano, en orden X, Y, Z (plano normal a Z: `[x, y]`; a Y:
+`[x, z]`; a X: `[y, z]`). Contornos: `circulo`, `rectangulo` (con radio en las esquinas),
+`ranura` (coliso) y `perfil` (rectas y arcos por tres puntos o por centro y giro). Un contorno
+dentro de otro es un hueco. Extensión ciega (con sentido), simétrica, pasante o pasante a los dos
+lados (estas dos solo para cortes). Calcula el área neta y el volumen teórico y rechaza contornos
+que se cortan.
+
+`crear_extrusion` crea la operación en dos pasos (`ProFeatureWithoptionsCreate` incompleta, croquis
+con `ProSectionEntityAdd` + acotado automático, y `ProFeatureWithoptionsRedefine`) y comprueba que
+las caras de la operación quedan al lado pedido del plano y que el volumen cambia como debe (exacto
+en la primera extrusión de una pieza vacía; como mucho área × profundidad después). Si no, la borra
+y prueba el otro sentido.
+
+Para levantar una pieza nueva: el usuario crea en Creo una pieza vacía con la plantilla del IAC y la
+deja abierta; se hace el contorno exterior y después cortes, taladros, redondeos y chaflanes, cada
+uno con su tabla y su confirmación. De un boceto o una foto solo se toman las cotas que el usuario
+confirma. Las cotas del croquis las pone Creo (acotado automático) y las redondea a sus decimales
+(en la prueba, un arco quedó a 0,001 mm de su punto): conviene revisarlas o sustituirlas en Creo si
+la pieza va a cambiar o lleva tolerancias finas.
+
 ## Holguras y criogenia
 
 `holguras_creo` filtra los pares de piezas por sus cajas, pide a Creo la distancia mínima exacta
@@ -110,7 +135,7 @@ Variables de entorno del servidor (bloque `env` en `claude_desktop_config.json`)
 | `CREO_MCP_EXPORT_DIR` | *(vacía = sin exportar)* | Carpeta autorizada para Excel, STEP y PDF (Creo debe poder escribir en ella) |
 | `CREO_MCP_AUDIT_LOG` | `~/.creo_mcp_iac/audit.jsonl` | Registro de auditoría |
 | `CREO_MCP_ALLOW_PARAMETERS` | `0` | `1` = activa `aplicar_parametros_excel` |
-| `CREO_MCP_ALLOW_OPERACIONES` | `0` | `1` = activa `crear_taladros`, `crear_patron`, `crear_redondeos`, `crear_chaflanes` y `borrar_operaciones_ia` (además, el servicio con `--escritura`). Es el interruptor principal de la escritura |
+| `CREO_MCP_ALLOW_OPERACIONES` | `0` | `1` = activa `crear_taladros`, `crear_patron`, `crear_redondeos`, `crear_chaflanes`, `crear_extrusion` y `borrar_operaciones_ia` (además, el servicio con `--escritura`). Es el interruptor principal de la escritura |
 | `CREO_MCP_ALLOW_DRAWINGS` | `0` | `1` = herramientas experimentales de planos nativos (no recomendadas) |
 | `CREO_MCP_CONTRACCION` | `contraccion_iac.json` del paquete | Tabla de contracción térmica (ΔL/L desde 293 K) de `holguras_creo` |
 | `CREO_MCP_ESTANDARES` | `estandares_iac.json` del paquete | Fichero de reglas de `revisar_estandares` (los formatos de código de plano de cada proyecto van aquí) |
@@ -146,7 +171,7 @@ pip install -e ".[test]"
 pytest -q
 ```
 
-169 pruebas sin Creo: CREOSON simulado (`tests/fake_creoson.py`) y el programa nativo simulado. Comprueban,
+197 pruebas sin Creo: CREOSON simulado (`tests/fake_creoson.py`) y el programa nativo simulado. Comprueban,
 entre otras cosas, que ninguna sesión de lectura envía escrituras, que las funciones peligrosas se
 bloquean, que la exportación nunca sobrescribe y que sin los permisos no se puede escribir en Creo.
 

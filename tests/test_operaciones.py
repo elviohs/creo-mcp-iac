@@ -321,7 +321,7 @@ async def test_sin_escritura_solo_propone(tmp_path, fake):
     nombres = {t.name for t in srv._tool_manager.list_tools()}
     assert {"caras_creo", "seleccion_creo", "proponer_taladros"} <= nombres
     assert not {"crear_taladros", "borrar_operaciones_ia", "crear_patron", "crear_redondeos",
-                "crear_chaflanes"} & nombres
+                "crear_chaflanes", "crear_extrusion"} & nombres
     err, p = await call(srv, "proponer_taladros", taladros=TALADROS[:1])
     assert not err and p["crear_activo"] is False and "desactivada" in p["siguiente"]
     err, msg = await call(srv, "caras_creo", modelo="TOP.ASM")

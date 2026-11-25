@@ -28,7 +28,7 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 PUERTO = 9057
 ORDENES = {"estado": 30, "interferencias": 900, "taladros": 600, "posiciones": 300, "caras": 60, "seleccion": 30,
            "arbol": 60, "aristas": 60, "holguras": 600}
@@ -54,14 +54,17 @@ def entorno() -> dict[str, str]:
 PLAN_RE = re.compile(r"^(modelo [A-Za-z0-9_\-]{1,80}\.PRT|serie [A-Za-z0-9_]{1,30}|tamano [A-Za-z0-9_.]{1,30}|"
                      r"e [0-9.]{3,150} (i -?\d+|d -?\d+(\.\d+)?|b [01]|r \d+ -?\d+|w [A-Z0-9_]{1,31}|c|k( \d+){1,64})|"
                      r"verificar( -?\d+(\.\d+)?){6}|alternar(_i)? [0-9.]+ [0-9.]+|patron \d+|"
-                     r"esperado( -?\d+(\.\d+)?){3}|sin_aristas( \d+){1,64})$")
+                     r"esperado( -?\d+(\.\d+)?){3}|sin_aristas( \d+){1,64}|"
+                     r"sk_ref \d+ \d+|sk_linea( -?\d+(\.\d+)?){6}|sk_arco( -?\d+(\.\d+)?){12}|sk_circulo( -?\d+(\.\d+)?){4}|"
+                     r"sentido (-1|0|1)|probar_sentidos|lado_material [0-3]|rango [XYZ]( -?\d+(\.\d+)?){2}|"
+                     r"volumen(_max)? -?\d+(\.\d+)?|volumen_signo -?1)$")
 
 
 def plan_valido(texto) -> bool:
-    if not isinstance(texto, str) or len(texto) > 20000:
+    if not isinstance(texto, str) or len(texto) > 150000:
         return False
     lineas = [x for x in texto.splitlines() if x.strip()]
-    return 0 < len(lineas) <= 200 and all(PLAN_RE.match(x) for x in lineas)
+    return 0 < len(lineas) <= 600 and all(PLAN_RE.match(x) for x in lineas)
 
 
 def pares_validos(pares) -> bool:

@@ -22,6 +22,7 @@ from . import masas as masas_mod
 from . import xlsx as xlsx_mod
 from .bom import build_bom
 from .conjugados import revisar_conjugados
+from .extrusiones import planificar_extrusion
 from .holguras import (buscar_material, candidatos, cargar_tabla, contraccion, piezas, punto_de_seleccion,
                        revisar_holguras)
 from .config import Settings
@@ -68,6 +69,11 @@ Servidor de SOLO LECTURA sobre Creo Parametric (IAC, Departamento de Ingeniería
   confirmación → `crear_redondeos`. Útil para corregir esquinas vivas que señale la revisión de
   fabricabilidad; el radio lo decide el usuario (p. ej. mayor que el de la fresa). Chaflanes igual:
   `proponer_chaflanes` (45×D o D×D, normalmente en aristas exteriores) → `crear_chaflanes`.
+- Extrusiones y cortes con croquis: `proponer_extrusion` (contornos en coordenadas de la pieza
+  sobre un plano o cara normal a X, Y o Z) → confirmación → `crear_extrusion`. Para levantar una
+  pieza desde un boceto: el usuario crea una pieza vacía con la plantilla del IAC; primero el
+  contorno exterior (extrusión), luego cortes, taladros, redondeos y chaflanes, de uno en uno y con
+  confirmación de cada tabla. Pide las cotas que falten; no las deduzcas de una foto sin confirmarlas.
 - Taladros en piezas: `seleccion_creo` (lo que el usuario seleccionó en Creo) o `caras_creo`
   para saber la cara y el punto; `proponer_taladros` prepara la tabla sin tocar Creo y da un
   `codigo`. Enseña la tabla y, solo con la confirmación expresa del usuario, `crear_taladros`
@@ -190,6 +196,7 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
     propuestas: dict[str, dict[str, Any]] = {}
     propuestas_patron: dict[str, dict[str, Any]] = {}
     propuestas_redondeo: dict[str, dict[str, Any]] = {}
+    propuestas_ext: dict[str, dict[str, Any]] = {}
     estado_ops: dict[str, Any] = {"desconocido": None}
     PROPUESTA_VALIDA_S = 1800
     mcp = FastMCP("creo-iac-lectura", instructions=INSTRUCTIONS)
@@ -283,7 +290,7 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
     ) -> dict[str, Any]:
         """Recoge el resultado de una herramienta larga que respondió «en_curso» (exportar_step,
         exportar_bom_excel, presupuesto_masas, revisar_estandares, interferencias_creo,
-        taladros_creo, taladros_conjugados, holguras_creo, crear_taladros, crear_patron, crear_redondeos, crear_chaflanes). Si aún no ha terminado, espera hasta esperar_s y vuelve a dar el estado:
+        taladros_creo, taladros_conjugados, holguras_creo, crear_taladros, crear_patron, crear_redondeos, crear_chaflanes, crear_extrusion). Si aún no ha terminado, espera hasta esperar_s y vuelve a dar el estado:
         llámala otra vez. No repitas la herramienta original mientras siga en curso."""
         t = tareas.obtener(tarea_id)
         return tareas.entregar(t, min(esperar_s, tareas.espera_s))
@@ -1749,6 +1756,65 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
             r["avisos"] = pl["avisos"]
         return r
 
+    @mcp.tool(annotations=READ)
+    @guard
+    def proponer_extrusion(
+        tipo: Annotated[Literal["anadir", "quitar"], Field(
+            description="anadir: extrusión que añade material; quitar: corte que quita material")],
+        plano: Annotated[str, Field(description="Plano del croquis: nombre de un plano de referencia (FRONT, TOP, "
+                                                "RIGHT, ALZADO…) o id de una cara plana (caras_creo o seleccion_creo). "
+                                                "Debe ser normal a X, Y o Z")],
+        contornos: Annotated[list[dict[str, Any]], Field(min_length=1, max_length=100, description=(
+            "Contornos cerrados en coordenadas de la pieza dentro del plano (normal a Z: [x, y]; a Y: [x, z]; "
+            "a X: [y, z]). Tipos: {tipo:'circulo', centro:[u,v], diametro}; {tipo:'rectangulo', centro|esquina:[u,v], "
+            "ancho (en u), alto (en v), radio_esquinas?}; {tipo:'ranura', centro1, centro2, ancho}; "
+            "{tipo:'perfil', puntos:[[u,v], [u,v], {hasta:[u,v], por:[u,v]}, {hasta, centro, giro:'horario'|"
+            "'antihorario'}, …]} (se cierra solo). Un contorno dentro de otro es un hueco"))],
+        extension: Annotated[Literal["ciega", "simetrica", "pasante", "pasante_ambos"], Field(
+            description="ciega: profundidad hacia `sentido`; simetrica: profundidad repartida a los dos lados del "
+                        "plano; pasante: corte hasta atravesar la pieza hacia `sentido`; pasante_ambos: corte que "
+                        "atraviesa a los dos lados (pasante solo para quitar)")] = "ciega",
+        profundidad: Annotated[float | None, Field(gt=0, le=10000, description="mm (ciega o simétrica)")] = None,
+        sentido: Annotated[str | None, Field(description="+X, -X, +Y, -Y, +Z o -Z, el eje normal al plano "
+                                                         "(ciega o pasante)")] = None,
+        modelo: ModelArg = None,
+    ) -> dict[str, Any]:
+        """Prepara una extrusión (añadir material) o un corte (quitar material) con croquis SIN
+        tocar Creo. Sirve para levantar una pieza a partir de un boceto acotado: primero una extrusión
+        con el contorno exterior, luego cortes, taladros, redondeos y chaflanes. Para empezar una pieza
+        nueva, el usuario crea en Creo una pieza vacía con la plantilla del IAC y la deja abierta.
+        Calcula el área y el volumen teórico y comprueba que los contornos no se corten. Devuelve la
+        tabla y un `codigo`: enséñala (contornos con sus medidas, plano, extensión, sentido) y, solo con
+        la confirmación expresa del usuario, crea con crear_extrusion(codigo)."""
+        m = _pieza(modelo)
+        caras = _caras(m)
+        nombre = nombre_operacion("EXT" if tipo == "anadir" else "CORTE", f"{datetime.now():%H%M%S}")
+        try:
+            pl = planificar_extrusion({"tipo": tipo, "plano": plano, "contornos": contornos, "extension": extension,
+                                       "profundidad": profundidad, "sentido": sentido}, caras, nombre)
+        except PlanError as e:
+            raise ValueError(str(e)) from e
+        codigo = "X" + hashlib.sha256(pl["plan"].encode()).hexdigest()[:7].upper()
+        ahora = time.time()
+        for k in [k for k, v in propuestas_ext.items() if ahora - v["creada"] > PROPUESTA_VALIDA_S]:
+            propuestas_ext.pop(k, None)
+        while len(propuestas_ext) >= 10:
+            propuestas_ext.pop(min(propuestas_ext, key=lambda k: propuestas_ext[k]["creada"]))
+        propuestas_ext[codigo] = {"modelo": pl["resumen"]["modelo"], "plan": pl["plan"], "resumen": pl["resumen"],
+                                  "creada": ahora, "ids_caras": pl["ids_caras"], "ids_planos": pl["ids_planos"],
+                                  "huella": huella(caras, pl["ids_caras"], pl["ids_planos"])}
+        gw.audit.write(event="propuesta_extrusion", modelo=pl["resumen"]["modelo"], codigo=codigo, tipo=tipo,
+                       contornos=len(contornos))
+        r = {"codigo": codigo, **pl["resumen"], "crear_activo": settings.allow_operaciones,
+             "siguiente": ("Enseña la tabla (contornos con sus medidas, plano del croquis, extensión y sentido, "
+                           "volumen teórico) y pide confirmación expresa. Solo entonces llama a crear_extrusion "
+                           "con este código." if settings.allow_operaciones else
+                           "La creación está desactivada en esta instalación (CREO_MCP_ALLOW_OPERACIONES=1)."),
+             "fuente": "Creo Toolkit (caras y planos de la pieza)"}
+        if pl["avisos"]:
+            r["avisos"] = pl["avisos"]
+        return r
+
     if settings.allow_operaciones:
 
         @mcp.tool(annotations=DRAW_DESTRUCTIVE)
@@ -1931,6 +1997,51 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
                     clase: {**p["resumen"], "id": op.get("id"), "nombre": op.get("nombre") or p["resumen"]["nombre"]},
                     "aviso": "Pieza modificada en la sesión de Creo, SIN GUARDAR. Revísala y guarda tú si estás conforme. "
                              f"Para deshacer: borrar_operaciones_ia con el id del {clase}."}
+
+        @mcp.tool(annotations=DRAW_DESTRUCTIVE)
+        @guard
+        @tareas.larga
+        def crear_extrusion(
+            codigo: Annotated[str, Field(description="Código que devolvió proponer_extrusion")],
+        ) -> dict[str, Any]:
+            """Crea en Creo la extrusión o el corte de una propuesta ya confirmada por el usuario.
+
+            Solo con la confirmación expresa del usuario sobre la tabla de proponer_extrusion. Vuelve
+            a leer la pieza: si el plano o las referencias han cambiado, no crea nada. La operación se
+            llama IA_EXT_* o IA_CORTE_*; se comprueba que queda al lado pedido del plano y que el
+            volumen cambia como debe (si no, se borra y se prueba el otro sentido). Nunca guarda. Para
+            deshacer, borrar_operaciones_ia con su id."""
+            if estado_ops["desconocido"]:
+                raise ValueError("Hay una escritura anterior con resultado desconocido. Comprueba Creo "
+                                 "(operaciones_creo) y vuelve a proponer antes de crear nada.")
+            p = propuestas_ext.pop((codigo or "").strip().upper(), None)
+            if p is None:
+                raise ValueError("No hay ninguna propuesta de extrusión con ese código (vale una vez, 30 min). "
+                                 "Vuelve a llamar a proponer_extrusion.")
+            if time.time() - p["creada"] > PROPUESTA_VALIDA_S:
+                raise ValueError("La propuesta ha caducado (30 min). Vuelve a llamar a proponer_extrusion.")
+            caras = nat.ejecutar("caras", p["modelo"])
+            if huella(caras, p["ids_caras"], p["ids_planos"]) != p["huella"]:
+                raise ValueError("La pieza ha cambiado desde la propuesta (plano del croquis o referencias): no se ha "
+                                 "creado nada. Vuelve a llamar a proponer_extrusion.")
+            try:
+                r = nat.ejecutar("crear", plan=p["plan"])
+            except NativoSinRespuesta as e:
+                estado_ops["desconocido"] = {**p["resumen"], "error": str(e)[:200]}
+                gw.audit.write(event="resultado_desconocido", tool="crear_extrusion", modelo=p["modelo"])
+                return {"estado": "resultado_desconocido", "extrusion": p["resumen"],
+                        "que_hacer": "Creo no respondió a tiempo: la operación puede haberse creado o no. Comprueba "
+                                     "con operaciones_creo si existe " + str(p["resumen"].get("nombre")) + "."}
+            op = r.get("operacion") or {}
+            gw.audit.write(event="operacion_creada", modelo=p["modelo"], id=op.get("id"), nombre=op.get("nombre"),
+                           intentos=op.get("intentos"))
+            return {"estado": "ok", "modelo": p["modelo"],
+                    "extrusion": {**p["resumen"], "id": op.get("id"), "nombre": op.get("nombre") or p["resumen"]["nombre"],
+                                  "intentos": op.get("intentos"), "cambio_volumen_mm3": op.get("cambio_volumen"),
+                                  "volumen_pieza_mm3": op.get("volumen_despues"),
+                                  "extension_en_eje": [op.get("extension_min"), op.get("extension_max")]},
+                    "aviso": "Pieza modificada en la sesión de Creo, SIN GUARDAR. Revísala y guarda tú si estás conforme. "
+                             "Para deshacer: borrar_operaciones_ia con su id."}
 
         @mcp.tool(annotations=DRAW_DESTRUCTIVE)
         @guard

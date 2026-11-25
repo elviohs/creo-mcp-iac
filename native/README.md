@@ -15,7 +15,8 @@ operaciones `IA_*` en una pieza en sesión. **Nunca guarda modelos.**
 | `holguras --pares F` | Distancia mínima entre pares de componentes (`ProFitClearanceCompute`) con los dos puntos más cercanos en coordenadas del conjunto; una línea por par, `ruta_a ruta_b` con ids separados por `/`. Si los puntos más cercanos están en caras cilíndricas, da su radio y su eje (`cilindro_a`, `cilindro_b`, desde 0.6.1) para los ajustes concéntricos. Si una pieza no tiene sólido (superficies importadas), repite el cálculo incluyendo superficies y, si no basta, facetas (`superficies: true`, 0.6.2-0.6.3). Se corta a los 540 s (`truncado`) | `holguras_creo` |
 | `caras` | Caras planas de la pieza (id, normal exterior, punto, área, caja), planos de referencia y cuerpo por defecto | `caras_creo`, `proponer_taladros` |
 | `seleccion` | Lo seleccionado en Creo: tipo, id, cara, coordenadas de un punto de referencia y punto pinchado | `seleccion_creo` |
-| `crear --plan F` | **Escribe.** Crea UNA operación a partir de un plan (árbol de elementos). Comprueba que el eje pasa por el punto pedido; si no, la borra y prueba los otros signos de las cotas. Con `patron <id>` crea un patrón de esa operación (`ProPatternCreate`) y comprueba cada miembro (`esperado x y z`), probando los sentidos (`alternar_i`) | `crear_taladros`, `crear_patron` |
+| `crear --plan F` | **Escribe.** Crea UNA operación a partir de un plan (árbol de elementos). Comprueba que el eje pasa por el punto pedido; si no, la borra y prueba los otros signos de las cotas. Con `patron <id>` crea un patrón de esa operación (`ProPatternCreate`) y comprueba cada miembro (`esperado x y z`), probando los sentidos (`alternar_i`) | `crear_taladros`, `crear_patron`, `crear_redondeos`, `crear_chaflanes` |
+| `crear --plan F` con croquis (0.7.0) | **Escribe.** Extrusión o corte: crea la operación incompleta, dibuja el croquis (`sk_*`) en su sección (`ProSectionEntityAdd`, `ProSectionAutodim`, `ProSectionSolve`), fija sentido y lado del material en el árbol extraído y la completa con `ProFeatureWithoptionsRedefine`. Comprueba la extensión de sus caras en el eje (`rango`) y el cambio de volumen (`volumen_max`, `volumen_signo`); si falla, la borra y prueba el otro sentido (`probar_sentidos`) | `crear_extrusion` |
 | `aristas` | Aristas de la pieza: id, recta/arco, longitud, extremos, punto medio, tangente, caras vecinas y forma (cóncava, convexa o tangente) | `aristas_creo`, `proponer_redondeos` |
 | `arbol [--ids L]` | Operaciones de la pieza (id, nombre, tipo, estado, patrón) o el árbol de elementos de las indicadas y de su patrón | `operaciones_creo` |
 | `borrar --ids 12,15` | **Escribe.** Borra operaciones cuyo nombre empieza por `IA_` y sin hijas ajenas; los patrones `IA_PAT_*` con `ProPatternDelete` (queda la guía) | `borrar_operaciones_ia` |
@@ -92,6 +93,22 @@ e 386.1340.1341 r 5 962          # referencia: tipo (5 superficie, 98 cuerpo) e 
 e 386.1964 w IA_M6X1_143022_1    # nombre de la operación
 verificar 10 20 5 0 1 0          # punto y dirección que debe tener el eje
 alternar 386.1340.706 386.1340.708   # cotas cuyo signo se prueba si el eje no cae en su sitio
+```
+
+Líneas de croquis (extrusiones y cortes, 0.7.0), con puntos en coordenadas de la pieza sobre el plano del croquis:
+
+```
+sk_ref 5 1                       # referencia del croquis (plano o cara) que se proyecta
+sk_linea x1 y1 z1 x2 y2 z2
+sk_arco cx cy cz  x1 y1 z1  x2 y2 z2  xm ym zm   # centro, inicio, fin y un punto intermedio
+sk_circulo cx cy cz r
+sentido -1                       # PRO_E_STD_DIRECTION (-1/1) tras definir la sección
+probar_sentidos                  # si la comprobación falla, la borra y prueba el otro
+lado_material 1                  # opcional (PRO_E_STD_MATRLSIDE)
+rango Z 0 10                     # las caras de la operación deben quedar en ese tramo del eje
+volumen_max 53326.5              # cambio de volumen con ese signo y como mucho ese valor (exacto si la pieza estaba vacía)
+volumen_signo -1                 # solo el signo (cortes pasantes)
+volumen 100                      # cambio exacto
 ```
 
 Tipos de valor: `i` entero, `d` real, `b` booleano, `w` texto, `r` referencia, `k` colección de
