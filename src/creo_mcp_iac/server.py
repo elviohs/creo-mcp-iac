@@ -32,7 +32,8 @@ from .nativo import (Nativo, NativoError, NativoSinRespuesta, resumir_interferen
                      resumir_taladros)
 from .nativo import nombre_fichero as nombre_fichero_nat
 from .operaciones import (PlanError, huella, huella_aristas, leer_hol, nombre_operacion, planificar_chaflan,
-                          planificar_patron, planificar_redondeo, planificar_taladro, resumir_aristas, resumir_caras, resumir_seleccion)
+                          orientacion, planificar_patron, planificar_patron_operacion, planificar_redondeo, planificar_taladro, resumir_aristas,
+                          resumir_caras, resumir_seleccion)
 from .tareas import GestorTareas
 
 INSTRUCTIONS = """\
@@ -1610,7 +1611,8 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
     @mcp.tool(annotations=READ)
     @guard
     def proponer_patron(
-        guia: Annotated[int, Field(gt=0, description="Id del taladro que se repite (taladros_creo o crear_taladros)")],
+        guia: Annotated[int, Field(gt=0, description="Id de la operación que se repite: un taladro (taladros_creo) o un "
+                                                     "corte, extrusión, redondeo o chaflán (operaciones_creo)")],
         tipo: Annotated[Literal["lineal", "circular"], Field(description="lineal (1 o 2 direcciones) o circular (alrededor de un eje)")],
         direccion1: Annotated[str | None, Field(description="Lineal: +X, -X, +Y, -Y, +Z o -Z (coordenadas de la pieza)")] = None,
         separacion1: Annotated[float | None, Field(gt=0, description="Lineal: separación entre miembros (mm)")] = None,
@@ -1623,20 +1625,32 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
         angulo: Annotated[float | None, Field(description="Circular: ángulo entre miembros (°). Vacío = 360/cantidad")] = None,
         modelo: ModelArg = None,
     ) -> dict[str, Any]:
-        """Prepara un patrón de un taladro SIN tocar Creo: lineal en una o dos direcciones o circular
-        alrededor de un eje de referencia. Calcula la posición de cada miembro, comprueba que caen
-        dentro de la cara (si alguno sale de la pieza, no lo propone), que no se pisan entre sí y
-        avisa si se pisan con otros taladros. Devuelve la tabla y un `codigo`: enséñala al usuario y,
+        """Prepara un patrón SIN tocar Creo: lineal en una o dos direcciones o circular alrededor de un
+        eje de referencia. De un taladro: calcula la posición de cada miembro, comprueba que caen dentro
+        de la cara (si alguno sale de la pieza, no lo propone), que no se pisan entre sí y avisa si se
+        pisan con otros taladros. De otra operación (corte, extrusión, redondeo, chaflán; desde 0.22.0):
+        da el desplazamiento o el giro de cada miembro y Creo comprueba al crear que cada uno queda en
+        su sitio. Devuelve la tabla y un `codigo`: enséñala al usuario y,
         solo con su confirmación expresa, crea el patrón con crear_patron(codigo)."""
         m = _pieza(modelo)
         caras = _caras(m)
-        guia_op, otros, _ = _guia_patron(m, guia)
         pet = {k: v for k, v in dict(tipo=tipo, direccion1=direccion1, separacion1=separacion1, cantidad1=cantidad1,
                                      direccion2=direccion2, separacion2=separacion2, cantidad2=cantidad2, eje=eje,
                                      cantidad=cantidad, angulo=angulo).items() if v is not None}
         nombre = nombre_operacion("PAT", f"{datetime.now():%H%M%S}")
+        generico = False
         try:
-            pl = planificar_patron(pet, caras, guia_op, otros, nombre)
+            guia_op, otros, _ = _guia_patron(m, guia)
+        except ValueError:
+            # no es un taladro colocado en una cara: patrón de una operación cualquiera (0.22.0)
+            ops = nat.ejecutar("arbol", m).get("operaciones", [])
+            guia_op = next((o for o in ops if o.get("id") == guia), None)
+            if guia_op is None:
+                raise ValueError(f"No hay ninguna operación con id {guia} en la pieza (operaciones_creo da los ids).")
+            generico = True
+        try:
+            pl = (planificar_patron_operacion(pet, caras, guia_op, nombre) if generico
+                  else planificar_patron(pet, caras, guia_op, otros, nombre))
         except PlanError as e:
             raise ValueError(str(e)) from e
         codigo = "P" + hashlib.sha256(pl["plan"].encode()).hexdigest()[:7].upper()
@@ -1644,8 +1658,8 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
         for k in [k for k, v in propuestas_patron.items() if ahora - v["creada"] > PROPUESTA_VALIDA_S]:
             propuestas_patron.pop(k, None)
         propuestas_patron[codigo] = {"modelo": pl["resumen"]["modelo"], "plan": pl["plan"], "resumen": pl["resumen"],
-                                     "creada": ahora, "guia": guia, "eje_guia": guia_op["eje"],
-                                     "huella": huella(caras, pl["ids_caras"], [])}
+                                     "creada": ahora, "guia": guia, "eje_guia": None if generico else guia_op["eje"],
+                                     "generico": generico, "huella": huella(caras, pl["ids_caras"], [])}
         gw.audit.write(event="propuesta_patron", modelo=pl["resumen"]["modelo"], codigo=codigo,
                        miembros=pl["resumen"]["miembros"])
         r = {"codigo": codigo, **pl["resumen"], "crear_activo": settings.allow_operaciones,
@@ -1724,13 +1738,19 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
     def proponer_chaflanes(
         aristas: Annotated[list[int], Field(min_length=1, max_length=64,
                                             description="Ids de las aristas (aristas_creo o seleccion_creo)")],
-        distancia: Annotated[float, Field(gt=0, le=200, description="Distancia D del chaflán (mm)")],
-        esquema: Annotated[Literal["45xD", "DxD"], Field(
+        distancia: Annotated[float, Field(gt=0, le=200, description="Distancia D del chaflán (mm); en D1xD2, D1")],
+        esquema: Annotated[Literal["45xD", "DxD", "D1xD2", "angxD"], Field(
             description="45xD: chaflán a 45° de lado D (lo habitual: Ch D×45°). DxD: misma distancia D a las dos "
-                        "caras (igual que 45xD si las caras forman 90°)")] = "45xD",
+                        "caras (igual que 45xD si las caras forman 90°). D1xD2: D1 sobre la cara de referencia y D2 "
+                        "sobre la otra. angxD: D sobre la cara de referencia y el ángulo medido desde ella")] = "45xD",
+        distancia2: Annotated[float | None, Field(gt=0, le=200, description="D1xD2: distancia D2 (mm)")] = None,
+        angulo: Annotated[float | None, Field(gt=0, lt=90, description="angxD: ángulo (°) medido desde la cara de "
+                                                                        "referencia")] = None,
+        cara_referencia: Annotated[int | None, Field(description="D1xD2 y angxD: id de la cara sobre la que se mide "
+                                                                 "D1 (o D); común a todas las aristas")] = None,
         modelo: ModelArg = None,
     ) -> dict[str, Any]:
-        """Prepara un chaflán de distancia constante sobre aristas de una pieza SIN tocar Creo
+        """Prepara un chaflán (45×D, D×D, D1×D2 o ángulo×D) sobre aristas de una pieza SIN tocar Creo
         (romper aristas vivas, entradas de taladros o de ejes). Lo normal es achaflanar aristas
         exteriores (convexas); avisa si alguna es interior. Devuelve la tabla y un `codigo`: enséñala
         y, solo con la confirmación expresa del usuario, crea con crear_chaflanes(codigo)."""
@@ -1738,7 +1758,9 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
         datos = nat.ejecutar("aristas", m)
         nombre = nombre_operacion(f"CHF_{distancia:g}", f"{datetime.now():%H%M%S}")
         try:
-            pl = planificar_chaflan({"aristas": list(aristas), "distancia": distancia, "esquema": esquema}, datos, nombre)
+            pl = planificar_chaflan({"aristas": list(aristas), "distancia": distancia, "esquema": esquema,
+                                     "distancia2": distancia2, "angulo": angulo, "cara_referencia": cara_referencia},
+                                    datos, nombre)
         except PlanError as e:
             raise ValueError(str(e)) from e
         codigo = "C" + hashlib.sha256(pl["plan"].encode()).hexdigest()[:7].upper()
@@ -1766,10 +1788,12 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
             description="anadir: extrusión que añade material; quitar: corte que quita material")],
         plano: Annotated[str, Field(description="Plano del croquis: nombre de un plano de referencia (FRONT, TOP, "
                                                 "RIGHT, ALZADO…) o id de una cara plana (caras_creo o seleccion_creo). "
-                                                "Debe ser normal a X, Y o Z")],
+                                                "Normal a X, Y o Z, o una cara oblicua (con un plano o cara "
+                                                "perpendicular a ella)")],
         contornos: Annotated[list[dict[str, Any]], Field(min_length=1, max_length=100, description=(
             "Contornos cerrados en coordenadas de la pieza dentro del plano (normal a Z: [x, y]; a Y: [x, z]; "
-            "a X: [y, z]). Tipos: {tipo:'circulo', centro:[u,v], diametro}; {tipo:'rectangulo', centro|esquina:[u,v], "
+            "a X: [y, z]). En una cara oblicua, [u, v]: u = distancia al plano perpendicular (referencia), v = "
+            "distancia a lo largo de la cara desde su arista paralela a ese plano; la tabla da el origen y los ejes. Tipos: {tipo:'circulo', centro:[u,v], diametro}; {tipo:'rectangulo', centro|esquina:[u,v], "
             "ancho (en u), alto (en v), radio_esquinas?}; {tipo:'ranura', centro1, centro2, ancho}; "
             "{tipo:'perfil', puntos:[[u,v], [u,v], {hasta:[u,v], por:[u,v]}, {hasta, centro, giro:'horario'|"
             "'antihorario'}, …]} (se cierra solo). Un contorno dentro de otro es un hueco"))],
@@ -1778,8 +1802,13 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
                         "plano; pasante: corte hasta atravesar la pieza hacia `sentido`; pasante_ambos: corte que "
                         "atraviesa a los dos lados (pasante solo para quitar)")] = "ciega",
         profundidad: Annotated[float | None, Field(gt=0, le=10000, description="mm (ciega o simétrica)")] = None,
-        sentido: Annotated[str | None, Field(description="+X, -X, +Y, -Y, +Z o -Z, el eje normal al plano "
+        sentido: Annotated[str | None, Field(description="+X, -X, +Y, -Y, +Z o -Z, el eje normal al plano; o, con el "
+                                                         "croquis en una cara, 'fuera' (hacia el exterior) o 'dentro' "
+                                                         "(hacia el material). En una cara oblicua, solo fuera/dentro "
                                                          "(ciega o pasante)")] = None,
+        referencia: Annotated[str | None, Field(description="Solo caras oblicuas: plano de referencia o cara "
+                                                            "perpendicular a la cara que mide la coordenada u (por "
+                                                            "defecto PERFIL, ALZADO o PLANTA si alguno lo es)")] = None,
         modelo: ModelArg = None,
     ) -> dict[str, Any]:
         """Prepara una extrusión (añadir material) o un corte (quitar material) con croquis SIN
@@ -1795,9 +1824,14 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
         m = _pieza(modelo)
         caras = _caras(m)
         nombre = nombre_operacion("EXT" if tipo == "anadir" else "CORTE", f"{datetime.now():%H%M%S}")
+        aristas = None
+        cara = next((c for c in caras.get("caras_planas", []) if str(c["id"]) == str(plano).strip()), None)
+        if cara and cara.get("normal_exterior") and orientacion(cara["normal_exterior"]) is None:
+            aristas = nat.ejecutar("aristas", m)           # cara oblicua: sus aristas sirven de referencia
         try:
             pl = planificar_extrusion({"tipo": tipo, "plano": plano, "contornos": contornos, "extension": extension,
-                                       "profundidad": profundidad, "sentido": sentido}, caras, nombre)
+                                       "profundidad": profundidad, "sentido": sentido, "referencia": referencia},
+                                      caras, nombre, aristas=aristas)
         except PlanError as e:
             raise ValueError(str(e)) from e
         codigo = "X" + hashlib.sha256(pl["plan"].encode()).hexdigest()[:7].upper()
@@ -1959,10 +1993,17 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
             if time.time() - p["creada"] > PROPUESTA_VALIDA_S:
                 raise ValueError("La propuesta ha caducado (30 min). Vuelve a llamar a proponer_patron.")
             caras = nat.ejecutar("caras", p["modelo"])
-            guia_op, _, _ = _guia_patron(p["modelo"], p["guia"])
-            if huella(caras, [p["resumen"]["cara"]], []) != p["huella"] or guia_op["eje"] != p["eje_guia"]:
-                raise ValueError("La pieza o el taladro guía han cambiado desde la propuesta: no se ha creado nada. "
-                                 "Vuelve a llamar a proponer_patron.")
+            if p.get("generico"):
+                ops = nat.ejecutar("arbol", p["modelo"]).get("operaciones", [])
+                g = next((o for o in ops if o.get("id") == p["guia"]), None)
+                if g is None or g.get("patron") or huella(caras, [], []) != p["huella"]:
+                    raise ValueError("La pieza o la operación guía han cambiado desde la propuesta: no se ha creado "
+                                     "nada. Vuelve a llamar a proponer_patron.")
+            else:
+                guia_op, _, _ = _guia_patron(p["modelo"], p["guia"])
+                if huella(caras, [p["resumen"]["cara"]], []) != p["huella"] or guia_op["eje"] != p["eje_guia"]:
+                    raise ValueError("La pieza o el taladro guía han cambiado desde la propuesta: no se ha creado nada. "
+                                     "Vuelve a llamar a proponer_patron.")
             try:
                 r = nat.ejecutar("crear", plan=p["plan"])
             except NativoSinRespuesta as e:

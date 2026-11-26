@@ -515,6 +515,112 @@ def planificar_patron(peticion: dict[str, Any], caras: dict[str, Any], guia: dic
     return {"plan": "\n".join(lineas) + "\n", "resumen": resumen, "avisos": avisos, "ids_caras": [cara["id"]]}
 
 
+TIPOS_PATRONABLES = {911: "taladro", 913: "redondeo", 914: "chaflán", 916: "corte", 917: "extrusión"}
+
+
+def _matriz_giro(d, ang):
+    """Matriz de giro (por filas) de `ang` radianes alrededor del vector unitario d."""
+    c, s_, t = math.cos(ang), math.sin(ang), 1 - math.cos(ang)
+    x, y, z = d
+    return [[t * x * x + c, t * x * y - s_ * z, t * x * z + s_ * y],
+            [t * x * y + s_ * z, t * y * y + c, t * y * z - s_ * x],
+            [t * x * z - s_ * y, t * y * z + s_ * x, t * z * z + c]]
+
+
+def planificar_patron_operacion(peticion: dict[str, Any], caras: dict[str, Any], guia: dict[str, Any],
+                                nombre: str) -> dict[str, Any]:
+    """Patrón lineal (1 o 2 direcciones) o circular de una operación que no es un taladro (corte,
+    extrusión, redondeo, chaflán…). `guia` = {id, nombre, tipo} (operaciones_creo). Cada miembro se
+    comprueba en Creo con la transformación (giro + traslación) que lo lleva desde la guía. No toca Creo."""
+    tipo = str(peticion.get("tipo", "")).lower()
+    if tipo not in ("lineal", "circular"):
+        raise PlanError("tipo: lineal o circular.")
+    if guia.get("patron"):
+        raise PlanError(f"La operación {guia.get('id')} ya forma parte de un patrón.")
+    clase = TIPOS_PATRONABLES.get(guia.get("tipo"))
+    if clase is None:
+        raise PlanError(f"La operación {guia.get('id')} ({guia.get('nombre')}) es de un tipo ({guia.get('tipo')}) que no "
+                        "se repite con esta herramienta: cortes, extrusiones, redondeos, chaflanes y taladros.")
+    modelo = caras["modelo"]["nombre"] + ".PRT"
+    e: list[str] = ["e 604.3124 i " + ("5" if tipo == "lineal" else "6")]
+    resumen: dict[str, Any] = {"modelo": modelo, "guia": guia["id"], "guia_nombre": guia.get("nombre"),
+                               "guia_tipo": clase, "tipo": tipo}
+    transf: list[tuple[list[list[float]], list[float]]] = []
+    ident = [[1.0, 0, 0], [0, 1.0, 0], [0, 0, 1.0]]
+    if tipo == "lineal":
+        dirs = []
+        for i in (1, 2):
+            d = peticion.get(f"direccion{i}")
+            if d is None:
+                continue
+            u = EJES.get(str(d).strip().upper())
+            if u is None:
+                raise PlanError(f"direccion{i}: +X, -X, +Y, -Y, +Z o -Z.")
+            sep = float(peticion.get(f"separacion{i}") or 0)
+            cant = int(peticion.get(f"cantidad{i}") or 0)
+            if sep <= 0 or cant < 2:
+                raise PlanError(f"separacion{i} > 0 y cantidad{i} ≥ 2 (incluida la guía).")
+            dirs.append((str(d).strip().upper(), u, sep, cant))
+        if not dirs:
+            raise PlanError("Indica al menos direccion1, separacion1 y cantidad1.")
+        if len(dirs) == 2 and abs(_dot(dirs[0][1], dirs[1][1])) > 1e-6:
+            raise PlanError("Las dos direcciones deben ser perpendiculares.")
+        n1, n2 = dirs[0][3], dirs[1][3] if len(dirs) == 2 else 1
+        for a in range(n1):
+            for b in range(n2):
+                t = [a * dirs[0][2] * dirs[0][1][i] for i in range(3)]
+                if len(dirs) == 2:
+                    t = [t[i] + b * dirs[1][2] * dirs[1][1][i] for i in range(3)]
+                transf.append((ident, t))
+        etiquetas = []
+        for i, (dn, u, sep, cant) in enumerate(dirs, 1):
+            ref, etiqueta = _referencia_direccion(caras, u)
+            sub = "3291" if i == 1 else "3292"
+            e += [f"e 604.3129.{sub}.3252.3253 {ref}", f"e 604.3129.{sub}.3252.3254 i 1",
+                  f"e 604.3129.{3273 + i} d {sep:.4f}", f"e 604.3129.{3306 + i} i 0",
+                  f"e 604.3129.{4025 + i} i -1"]
+            etiquetas.append(f"{cant} × {sep:g} mm hacia {dn} ({etiqueta})")
+        e += [f"e 604.3129.3134 i {n1}", f"e 604.3129.3136 i {n2}"]
+        alternar = "alternar_i 604.3129.3307 604.3129.3308" if len(dirs) == 2 else "alternar_i 604.3129.3307 604.3129.3307"
+        resumen["direcciones"] = etiquetas
+        modo = "caja"
+    else:
+        nom = str(peticion.get("eje") or "").strip()
+        eje = next((x for x in caras.get("ejes_referencia", [])
+                    if str(x.get("nombre", "")).upper() == nom.upper() or str(x.get("id")) == nom), None)
+        if eje is None:
+            disp = ", ".join(str(x.get("nombre")) for x in caras.get("ejes_referencia", [])) or "ninguno"
+            raise PlanError(f"eje: nombre de un eje de referencia de la pieza (hay: {disp}).")
+        d = _unit(eje["direccion"])
+        cant = int(peticion.get("cantidad") or 0)
+        if cant < 2:
+            raise PlanError("cantidad ≥ 2 (incluida la guía).")
+        ang = float(peticion.get("angulo") or 360.0 / cant)
+        if not 0 < abs(ang) * (cant - 1) < 360 + 1e-6:
+            raise PlanError("angulo × (cantidad − 1) debe ser menor que 360°.")
+        pe = [float(c) for c in eje["punto"]]
+        for i in range(cant):
+            R = _matriz_giro(d, math.radians(ang * i))
+            Rp = [sum(R[r][c] * pe[c] for c in range(3)) for r in range(3)]
+            transf.append((R, [pe[r] - Rp[r] for r in range(3)]))
+        e += [f"e 604.3130.3273 r 21 {eje['id']}", f"e 604.3130.3276 d {ang:.4f}", "e 604.3130.3309 i 0",
+              f"e 604.3130.3134 i {cant}", "e 604.3130.3136 i 1"]
+        alternar = "alternar_i 604.3130.3309 604.3130.3309"
+        resumen.update(eje=eje.get("nombre"), cantidad=cant, angulo=ang)
+        modo = "superficie"
+    e += ["e 604.3131 i 4", f"e 604.1964 w {nombre}"]
+    resumen.update(miembros=len(transf), nombre=nombre,
+                   desplazamientos=[[round(v, 3) for v in t] for R, t in transf] if tipo == "lineal" else None)
+    avisos = []
+    if clase in ("redondeo", "chaflán"):
+        avisos.append("Un patrón de redondeos o chaflanes solo sale si en cada posición hay una arista equivalente "
+                      "(normalmente, porque la operación que la crea también está repetida).")
+    lineas = [f"modelo {modelo}", f"patron {guia['id']}", *e, f"transf_modo {modo}",
+              *[f"transf {' '.join(f'{v:.9f}' for fila in R for v in fila)} {' '.join(f'{v:.6f}' for v in t)}"
+                for R, t in transf], alternar]
+    return {"plan": "\n".join(lineas) + "\n", "resumen": resumen, "avisos": avisos, "ids_caras": []}
+
+
 # --------------------------------------------------------------- redondeos
 
 def _corregir_forma(datos: dict[str, Any]) -> dict[str, Any]:
@@ -598,35 +704,68 @@ def planificar_redondeo(peticion: dict[str, Any], aristas: dict[str, Any], nombr
     return {"plan": "\n".join(lineas) + "\n", "resumen": resumen, "avisos": avisos}
 
 
-ESQUEMAS_CHAFLAN = {"45xD": 601, "DxD": 602}
+ESQUEMAS_CHAFLAN = {"45xD": 601, "DxD": 602, "D1xD2": 603, "angxD": 604}
 
 
 def planificar_chaflan(peticion: dict[str, Any], aristas: dict[str, Any], nombre: str) -> dict[str, Any]:
-    """Chaflán de distancia constante (45×D o D×D) sobre una o varias aristas. No toca Creo."""
+    """Chaflán sobre una o varias aristas: 45×D, D×D, D1×D2 (D1 medida sobre la cara de referencia y D2
+    sobre la otra) o ángulo×D (D sobre la cara de referencia y el ángulo medido desde ella). No toca Creo."""
     esquema = str(peticion.get("esquema") or "45xD")
     if esquema not in ESQUEMAS_CHAFLAN:
-        raise PlanError("esquema: 45xD (45° y distancia D) o DxD (misma distancia a las dos caras).")
+        raise PlanError("esquema: 45xD, DxD, D1xD2 o angxD.")
     d = float(peticion.get("distancia") or 0)
     if d <= 0:
         raise PlanError("distancia: obligatoria y positiva (mm).")
+    d2 = ang = None
+    if esquema == "D1xD2":
+        d2 = float(peticion.get("distancia2") or 0)
+        if d2 <= 0:
+            raise PlanError("distancia2: obligatoria y positiva en D1xD2 (mm).")
+    if esquema == "angxD":
+        ang = float(peticion.get("angulo") or 0)
+        if not 0 < ang < 90:
+            raise PlanError("angulo: entre 0 y 90° en angxD.")
     # se reutilizan las comprobaciones del redondeo (aristas, tangentes, longitud)
-    base = planificar_redondeo({"aristas": peticion.get("aristas"), "radio": d}, aristas, nombre)
+    base = planificar_redondeo({"aristas": peticion.get("aristas"), "radio": max(d, d2 or 0)}, aristas, nombre)
     avisos = [a.replace("El radio", "La distancia") for a in base["avisos"]]
     concavas = [a["id"] for a in base["resumen"]["aristas"] if a.get("forma") == "concava"]
     if concavas:
         avisos.append(f"Las aristas {concavas} son esquinas interiores: un chaflán ahí AÑADE material. Lo normal es "
                       "achaflanar aristas exteriores (convexas).")
+    ref = None
+    if esquema in ("D1xD2", "angxD"):
+        ref = peticion.get("cara_referencia")
+        if ref is None:
+            raise PlanError("cara_referencia: id de la cara sobre la que se mide D1 (o D en angxD); tiene que ser una "
+                            "de las dos caras de cada arista (aristas_creo da las caras).")
+        ref = int(ref)
+        por_id = {a["id"]: a for a in _corregir_forma(aristas).get("aristas", [])}
+        malas = [i for i in (int(x) for x in peticion.get("aristas") or []) if ref not in (por_id.get(i, {}).get("caras") or [])]
+        if malas:
+            raise PlanError(f"La cara {ref} no es una de las caras de las aristas {malas}: en D1xD2 y angxD todas las "
+                            "aristas tienen que compartir la cara de referencia.")
     lista = " ".join(str(a["id"]) for a in base["resumen"]["aristas"])
     e = ["e 386.387 i 914", f"e 386.1964 w {nombre}",
          f"e 386.2101.2102.2103 i {ESQUEMAS_CHAFLAN[esquema]}",
          "e 386.2101.2102.3184 i 1",                 # forma: superficies desplazadas
          "e 386.2101.2102.2121.2179 i 1",            # referencias: aristas
          f"e 386.2101.2102.2121.2124 k {lista}",
-         "e 386.2101.2102.2123.2122.2106.2108 i 1",  # distancia por valor
-         f"e 386.2101.2102.2123.2122.2106.2109 d {d:.4f}",
-         "e 386.3042 i 0"]
+         "e 386.2101.2102.2123.2122.2106.2108 i 1",  # LEG1 por valor
+         f"e 386.2101.2102.2123.2122.2106.2109 d {d:.4f}"]
+    if ref is not None:
+        e.append(f"e 386.2101.2102.2121.2104 r 5 {ref}")   # cara de referencia de D1 / D
+        segundo = d2 if esquema == "D1xD2" else ang
+        e += ["e 386.2101.2102.2123.2122.2107.2108 i 1",    # LEG2 por valor: D2 o ángulo
+              f"e 386.2101.2102.2123.2122.2107.2109 d {segundo:.4f}"]
+    e.append("e 386.3042 i 0")
     resumen = {k: v for k, v in base["resumen"].items() if k != "radio"}
     resumen.update(esquema=esquema, distancia=d, nombre=nombre, tipo="chaflan")
+    if d2 is not None:
+        resumen.update(distancia2=d2, cara_referencia=ref,
+                       medida=f"D1 = {d:g} sobre la cara {ref}, D2 = {d2:g} sobre la otra")
+    if ang is not None:
+        resumen.update(angulo=ang, cara_referencia=ref,
+                       medida=f"D = {d:g} sobre la cara {ref} y {ang:g}° medidos desde ella")
     lineas = [f"modelo {base['resumen']['modelo']}", *e]
     return {"plan": "\n".join(lineas) + "\n", "resumen": resumen, "avisos": avisos}
 
@@ -728,7 +867,7 @@ def huella(caras: dict[str, Any], ids_caras: list[int], ids_planos: list[int]) -
 PLAN_RE = re.compile(r"^(modelo [A-Za-z0-9_\-]{1,80}\.PRT|serie [A-Za-z0-9_]{1,30}|tamano [A-Za-z0-9_.]{1,30}|"
                      r"e [0-9.]{3,150} (i -?\d+|d -?\d+(\.\d+)?|b [01]|r \d+ -?\d+|w [A-Z0-9_]{1,31}|c|k( \d+){1,64})|"
                      r"verificar( -?\d+(\.\d+)?){6}|alternar(_i)? [0-9.]+ [0-9.]+|patron \d+|"
-                     r"esperado( -?\d+(\.\d+)?){3}|sin_aristas( \d+){1,64}|"
+                     r"esperado( -?\d+(\.\d+)?){3}|sin_aristas( \d+){1,64}|transf( -?\d+(\.\d+)?){12}|transf_modo (caja|superficie)|"
                      r"sk_ref \d+ \d+|sk_linea( -?\d+(\.\d+)?){6}|sk_arco( -?\d+(\.\d+)?){12}|sk_circulo( -?\d+(\.\d+)?){4}|"
                      r"sk_cota ((diam|radio) \d+|ref \d+ [cse] \d+|refl \d+ \d+|entre \d+ \d+|diaeje \d+ [csew] \d+)( -?\d+(\.\d+)?){4}|"
                      r"sk_eje( -?\d+(\.\d+)?){6}|"

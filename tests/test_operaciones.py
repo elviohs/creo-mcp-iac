@@ -539,6 +539,43 @@ async def test_proponer_y_crear_redondeo(tmp_path, fake):
     assert creo.llamadas[-1][1] == "borrar"
 
 
+def test_chaflan_d1xd2_y_angulo():
+    pl = ops.planificar_chaflan({"aristas": [2002], "distancia": 1, "distancia2": 2, "esquema": "D1xD2",
+                                 "cara_referencia": 962}, ARISTAS, "N")
+    p = pl["plan"].splitlines()
+    assert "e 386.2101.2102.2103 i 603" in p and "e 386.2101.2102.2121.2104 r 5 962" in p
+    assert "e 386.2101.2102.2123.2122.2106.2109 d 1.0000" in p and "e 386.2101.2102.2123.2122.2107.2109 d 2.0000" in p
+    assert ops.plan_valido(pl["plan"]) and pl["resumen"]["distancia2"] == 2
+    pl = ops.planificar_chaflan({"aristas": [2002], "distancia": 2, "angulo": 30, "esquema": "angxD",
+                                 "cara_referencia": 971}, ARISTAS, "N")
+    p = pl["plan"].splitlines()
+    assert "e 386.2101.2102.2103 i 604" in p and "e 386.2101.2102.2123.2122.2107.2109 d 30.0000" in p
+    assert "30° medidos desde ella" in pl["resumen"]["medida"]
+
+
+def test_patron_de_operacion():
+    caras = {**CARAS, "ejes_referencia": [{"nombre": "Y", "id": 8, "direccion": [0, 1, 0], "punto": [0, 0, 0]}]}
+    guia = {"id": 1500, "nombre": "IA_CORTE_1", "tipo": 916, "estado": 0, "patron": 0}
+    pl = ops.planificar_patron_operacion({"tipo": "lineal", "direccion1": "+X", "separacion1": 15, "cantidad1": 3},
+                                         caras, guia, "IA_PAT_1")
+    p = pl["plan"].splitlines()
+    assert "patron 1500" in p and "transf_modo caja" in p
+    tr = [x for x in p if x.startswith("transf ")]
+    assert len(tr) == 3 and tr[2].endswith("30.000000 0.000000 0.000000")
+    assert ops.plan_valido(pl["plan"]) and pl["resumen"]["guia_tipo"] == "corte"
+    pl = ops.planificar_patron_operacion({"tipo": "circular", "eje": "Y", "cantidad": 4}, caras, guia, "N")
+    tr = [x.split()[1:] for x in pl["plan"].splitlines() if x.startswith("transf ")]
+    R = [[float(v) for v in tr[1][3 * i:3 * i + 3]] for i in range(3)]      # 90° alrededor de Y
+    assert R[0] == pytest.approx([0, 0, 1], abs=1e-9) and R[2] == pytest.approx([-1, 0, 0], abs=1e-9)
+    assert "transf_modo superficie" in pl["plan"] and ops.plan_valido(pl["plan"])
+    with pytest.raises(ops.PlanError, match="no se repite"):
+        ops.planificar_patron_operacion({"tipo": "lineal", "direccion1": "+X", "separacion1": 5, "cantidad1": 2},
+                                        caras, {**guia, "tipo": 923}, "N")
+    with pytest.raises(ops.PlanError, match="ya forma parte"):
+        ops.planificar_patron_operacion({"tipo": "lineal", "direccion1": "+X", "separacion1": 5, "cantidad1": 2},
+                                        caras, {**guia, "patron": 1}, "N")
+
+
 def test_plan_de_chaflan():
     pl = ops.planificar_chaflan({"aristas": [2002], "distancia": 1.5}, ARISTAS, "IA_CHF_1_5_1")
     p = pl["plan"].splitlines()
@@ -549,7 +586,12 @@ def test_plan_de_chaflan():
     dxd = ops.planificar_chaflan({"aristas": [2001], "distancia": 1, "esquema": "DxD"}, ARISTAS, "X")
     assert "e 386.2101.2102.2103 i 602" in dxd["plan"] and any("interiores" in a for a in dxd["avisos"])
     for pet, txt in [({"aristas": [2002], "distancia": 0}, "distancia"),
-                     ({"aristas": [2002], "distancia": 1, "esquema": "D1xD2"}, "esquema"),
+                     ({"aristas": [2002], "distancia": 1, "esquema": "D1xD2"}, "distancia2"),
+                     ({"aristas": [2002], "distancia": 1, "esquema": "D1xD2", "distancia2": 2}, "cara_referencia"),
+                     ({"aristas": [2002], "distancia": 1, "esquema": "D1xD2", "distancia2": 2, "cara_referencia": 3001},
+                      "no es una de las caras"),
+                     ({"aristas": [2002], "distancia": 1, "esquema": "angxD", "cara_referencia": 962}, "angulo"),
+                     ({"aristas": [2002], "distancia": 1, "esquema": "otro"}, "esquema"),
                      ({"aristas": [2003], "distancia": 1}, "tangentes")]:
         with pytest.raises(ops.PlanError, match=txt):
             ops.planificar_chaflan(pet, ARISTAS, "X")
@@ -577,3 +619,16 @@ async def test_proponer_y_crear_chaflan(tmp_path, fake):
 def test_forma_invertida_en_tk_050():
     viejo = {**ARISTAS, "version_tk": "0.5.0"}
     assert [a["id"] for a in ops.resumir_aristas(viejo, forma="concava")["aristas"]] == [2002]
+
+
+@pytest.mark.anyio
+async def test_proponer_patron_de_operacion_que_no_es_taladro(tmp_path, fake):
+    fake.files = ["PRUEBA_CMD.PRT"]
+    fake.active = "PRUEBA_CMD.PRT"
+    creo = CreoSimulado()
+    srv = servidor(tmp_path, fake, creo)
+    # la operación 1 (PERFIL, plano de referencia) no es un taladro: va por la vía general y se rechaza por su tipo
+    err, msg = await call(srv, "proponer_patron", guia=1, tipo="lineal", direccion1="+X", separacion1=10, cantidad1=2)
+    assert err and "no se repite" in msg
+    err, msg = await call(srv, "proponer_patron", guia=777, tipo="lineal", direccion1="+X", separacion1=10, cantidad1=2)
+    assert err and "operaciones_creo" in msg

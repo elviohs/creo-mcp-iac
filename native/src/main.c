@@ -79,7 +79,7 @@
 #include <time.h>
 #include "salida.h"
 
-#define VERSION_TK "0.10.0"
+#define VERSION_TK "0.11.0"
 #define MAX_MODELOS 20000
 
 static ProProcessHandle sesion;
@@ -1294,12 +1294,77 @@ static int n_esperados = 0;
 
 typedef struct { double a[MAX_ESPERADOS + 1][6]; int id[MAX_ESPERADOS + 1]; int n; } EjesMiembros;
 
+/* Patrones de operaciones que no son taladros (0.11.0): cada miembro se localiza por un punto
+   (modo 1: centro de la caja de sus superficies, para patrones lineales; modo 2: punto medio, en
+   parametros, de su primera superficie, que gira con el miembro, para patrones circulares) y se
+   compara con el punto de la guia transformado por la matriz de cada miembro («transf»). */
+static double transfs[MAX_ESPERADOS][12];
+static int n_transf = 0, modo_transf = 0;
+typedef struct { double lo[3], hi[3]; int n, modo; double p[3]; int hay; } PuntoOp;
+static ProError visita_sup_punto(ProGeomitem *it, ProError st, ProAppData d)
+{
+    PuntoOp *po = (PuntoOp *)d;
+    ProSurface s = NULL;
+    ProGeomitemdata *gd = NULL;
+    int k;
+    if (ProGeomitemToSurface(it, &s) != PRO_TK_NO_ERROR) return PRO_TK_NO_ERROR;
+    if (ProSurfaceDataGet(s, &gd) != PRO_TK_NO_ERROR || gd == NULL || gd->data.p_surface_data == NULL) return PRO_TK_NO_ERROR;
+    {
+        ProSurfacedata *sd = gd->data.p_surface_data;
+        if (po->modo == 1) {
+            for (k = 0; k < 3; k++) {
+                double a = sd->xyz_min[k] < sd->xyz_max[k] ? sd->xyz_min[k] : sd->xyz_max[k];
+                double b = sd->xyz_min[k] < sd->xyz_max[k] ? sd->xyz_max[k] : sd->xyz_min[k];
+                if (po->n == 0 || a < po->lo[k]) po->lo[k] = a;
+                if (po->n == 0 || b > po->hi[k]) po->hi[k] = b;
+            }
+            po->n++;
+        } else if (!po->hay) {
+            ProUvParam uv;
+            ProVector xyz, d1[2], d2[3], nrm;
+            uv[0] = 0.5 * (sd->uv_min[0] + sd->uv_max[0]);
+            uv[1] = 0.5 * (sd->uv_min[1] + sd->uv_max[1]);
+            if (ProSurfaceXyzdataEval(s, uv, xyz, d1, d2, nrm) == PRO_TK_NO_ERROR) {
+                for (k = 0; k < 3; k++) po->p[k] = xyz[k];
+                po->hay = 1;
+            }
+        }
+    }
+    ProGeomitemdataFree(&gd);
+    return PRO_TK_NO_ERROR;
+}
+
+static int punto_operacion(ProFeature *f, int modo, double *p)
+{
+    PuntoOp po;
+    int k;
+    memset(&po, 0, sizeof(po));
+    po.modo = modo;
+    ProFeatureGeomitemVisit(f, PRO_SURFACE, visita_sup_punto, NULL, (ProAppData)&po);
+    if (modo == 1) {
+        if (po.n == 0) return 0;
+        for (k = 0; k < 3; k++) p[k] = 0.5 * (po.lo[k] + po.hi[k]);
+        return 1;
+    }
+    if (!po.hay) return 0;
+    for (k = 0; k < 3; k++) p[k] = po.p[k];
+    return 1;
+}
+
 static ProError visita_miembro(ProFeature *f, ProError st, ProAppData d)
 {
     EjesMiembros *em = (EjesMiembros *)d;
     EjeLeido eje;
     int k;
     if (em->n > MAX_ESPERADOS) return PRO_TK_NO_ERROR;
+    if (modo_transf) {
+        double p[3];
+        int ok = punto_operacion(f, modo_transf, p);
+        em->id[em->n] = f->id;
+        for (k = 0; k < 3; k++) { em->a[em->n][k] = ok ? p[k] : 1e30; em->a[em->n][3 + k] = 0; }
+        em->n++;
+        return PRO_TK_NO_ERROR;
+    }
     memset(&eje, 0, sizeof(eje));
     ProFeatureGeomitemVisit(f, PRO_AXIS, visita_eje_creado, NULL, &eje);
     em->id[em->n] = f->id;
@@ -1313,6 +1378,23 @@ static int patron_correcto(EjesMiembros *em, const double *dir, double *peor)
 {
     int i, j;
     *peor = 0;
+    if (modo_transf) {
+        /* n_esperados puntos ya transformados desde el punto de la guia */
+        if (em->n != n_esperados) return 0;
+        for (i = 0; i < n_esperados; i++) {
+            double mejor = 1e30;
+            for (j = 0; j < em->n; j++) {
+                double dx, dy, dz, dist;
+                if (em->a[j][0] > 1e29) continue;
+                dx = em->a[j][0] - esperados[i][0]; dy = em->a[j][1] - esperados[i][1]; dz = em->a[j][2] - esperados[i][2];
+                dist = sqrt(dx * dx + dy * dy + dz * dz);
+                if (dist < mejor) mejor = dist;
+            }
+            if (mejor > *peor) *peor = mejor;
+            if (mejor > 0.02) return 0;
+        }
+        return 1;
+    }
     if (em->n != n_esperados) return 0;
     for (i = 0; i < n_esperados; i++) {
         double mejor = 1e30;
@@ -1344,6 +1426,21 @@ static int crear_patron(ProMdl mdl, ProElement raiz, int id_guia, const double *
     ProFeaturePatternStatusGet(&guia, &ps);
     if (ps != PRO_PATTERN_NONE) {
         error_json("plan", id_guia, "La operacion guia ya forma parte de un patron"); return 2;
+    }
+    if (n_transf > 0) {
+        double p0[3];
+        int i, k;
+        if (!punto_operacion(&guia, modo_transf, p0)) {
+            ProElementFree(&raiz);
+            error_json("plan", id_guia, "La operacion guia no tiene superficies con las que situar los miembros");
+            return 2;
+        }
+        n_esperados = n_transf < MAX_ESPERADOS ? n_transf : MAX_ESPERADOS;
+        for (i = 0; i < n_esperados; i++)
+            for (k = 0; k < 3; k++)
+                esperados[i][k] = transfs[i][3 * k] * p0[0] + transfs[i][3 * k + 1] * p0[1] + transfs[i][3 * k + 2] * p0[2]
+                                  + transfs[i][9 + k];
+        max_intentos = (e1 || e2) ? 4 : 1;
     }
     if (e1) ProElementIntegerGet(e1, NULL, &v1);
     if (e2) ProElementIntegerGet(e2, NULL, &v2);
@@ -1907,6 +2004,8 @@ static int orden_crear(const char *fichero)
     n_sk = 0;
     n_sk_refs = 0;
     n_cotas = 0;
+    n_transf = 0;
+    modo_transf = 0;
     f = fopen(fichero ? fichero : "", "r");
     if (!f) { error_json("plan", -1, "No se puede abrir el fichero del plan"); return 2; }
     while (fgets(linea, sizeof(linea), f)) {
@@ -1992,6 +2091,21 @@ static int orden_crear(const char *fichero)
         }
         if (!strcmp(clave, "lado_material")) {
             if (sscanf(t, "%*s %d", &lado_mat) != 1 || lado_mat < 0 || lado_mat > 3) lineas_mal++;
+            continue;
+        }
+        if (!strcmp(clave, "transf")) {
+            const char *q = t + 6;
+            int k, us, leidos = 0;
+            if (n_transf >= MAX_ESPERADOS) { lineas_mal++; continue; }
+            for (k = 0; k < 12; k++) { if (sscanf(q, "%lf%n", &transfs[n_transf][k], &us) != 1) break; q += us; leidos++; }
+            if (leidos != 12) { lineas_mal++; continue; }
+            n_transf++;
+            continue;
+        }
+        if (!strcmp(clave, "transf_modo")) {
+            char md[16] = "";
+            sscanf(t, "%*s %15s", md);
+            if (!strcmp(md, "caja")) modo_transf = 1; else if (!strcmp(md, "superficie")) modo_transf = 2; else lineas_mal++;
             continue;
         }
         if (!strcmp(clave, "esperado")) {

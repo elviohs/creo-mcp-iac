@@ -113,7 +113,7 @@ def test_errores(pet, msg):
 def test_plano_oblicuo_rechazado():
     caras = json.loads(json.dumps(VACIA))
     caras["planos_referencia"].append({"nombre": "OBLICUO", "id": 9, "normal": [0.6, 0.8, 0], "origen": [0, 0, 0]})
-    with pytest.raises(PlanError, match="perpendicular a un eje"):
+    with pytest.raises(PlanError, match="cara plana"):
         planificar_extrusion({"tipo": "anadir", "plano": "OBLICUO", "profundidad": 5, "sentido": "+Z",
                               "contornos": [{"tipo": "circulo", "centro": [0, 0], "diametro": 5}]}, caras, "N")
 
@@ -304,3 +304,88 @@ def test_servicio_valida_la_plantilla():
     codigo, r = m.ejecutar({"orden": "pieza_nueva", "modelo": "A.PRT", "plantilla": "wtpub://x/y.prt;borrar"},
                            runner=lambda *a, **k: None)
     assert codigo == 400 and "Plantilla" in r["error"]
+
+
+# --- croquis en caras oblicuas (0.21.0) ---------------------------------------------------------
+
+S, C = math.sin(math.radians(30)), math.cos(math.radians(30))
+# Cuña: base 40 (X) × 30 (Z) en Y = 0; cara inclinada 30° alrededor de X que sube hacia +Z: normal (0, C, -S)
+CUNA = {"modelo": {"nombre": "CUNA"}, "unidad_longitud": "mm", "cuerpo_por_defecto": -5778,
+        "caras_planas": [
+            {"id": 900, "normal_exterior": [0, -1, 0], "punto_plano": [0, 0, 15], "caja_min": [-20, 0, 0], "caja_max": [20, 0, 30]},
+            {"id": 910, "normal_exterior": [0, C, -S], "punto_plano": [0, 5, 0],
+             "caja_min": [-20, 5, 0], "caja_max": [20, 5 + 30 * S / C, 30]},
+            {"id": 920, "normal_exterior": [-1, 0, 0], "punto_plano": [-20, 5, 15], "caja_min": [-20, 0, 0], "caja_max": [-20, 22, 30]},
+            {"id": 930, "normal_exterior": [1, 0, 0], "punto_plano": [20, 5, 15], "caja_min": [20, 0, 0], "caja_max": [20, 22, 30]}],
+        "planos_referencia": [{"nombre": "PERFIL", "id": 2, "normal": [1, 0, 0], "origen": [0, 0, 0]},
+                              {"nombre": "PLANTA", "id": 4, "normal": [0, 1, 0], "origen": [0, 0, 0]},
+                              {"nombre": "ALZADO", "id": 6, "normal": [0, 0, 1], "origen": [0, 0, 0]}]}
+L_INC = 30 / C                                  # longitud de la cara inclinada
+CUNA_ARISTAS = {"modelo": {"nombre": "CUNA"}, "aristas": [
+    {"id": 5001, "tipo": "recta", "inicio": [-20, 5, 0], "fin": [20, 5, 0], "longitud": 40, "caras": [910, 950]},
+    {"id": 5002, "tipo": "recta", "inicio": [-20, 5 + 30 * S / C, 30], "fin": [20, 5 + 30 * S / C, 30], "longitud": 40,
+     "caras": [910, 960]},
+    {"id": 5003, "tipo": "recta", "inicio": [-20, 5, 0], "fin": [-20, 5 + 30 * S / C, 30], "longitud": L_INC,
+     "caras": [910, 920]}]}
+
+
+def test_corte_en_cara_oblicua():
+    pl = planificar_extrusion({"tipo": "quitar", "plano": 910, "profundidad": 4, "sentido": "dentro",
+                               "contornos": [{"tipo": "circulo", "centro": [5, 10], "diametro": 6}]},
+                              CUNA, "N", aristas=CUNA_ARISTAS)
+    p = pl["plan"]
+    assert plan_valido(p)
+    # referencias: PERFIL (perpendicular a la cara, orienta el croquis) y la arista baja 5001 (paralela a PERFIL… en u)
+    assert lineas(p, "sk_ref")[:2] == ["sk_ref 5 2", "sk_ref 6 5001"]
+    assert "e 386.447.450.455 r 5 2" in p and "rango" not in p
+    assert "sentido -1" in p and "probar_sentidos" in p
+    # el centro (u=5, v=10) cae en x = 5 y a 10 mm de la arista 5001 a lo largo de la cara
+    t = [float(x) for x in lineas(p, "sk_circulo")[0].split()[1:]]
+    esperado = [5, 5 + 10 * S, 10 * C]
+    assert t[:3] == pytest.approx(esperado, abs=1e-6) and t[3] == pytest.approx(3)
+    assert pl["resumen"]["cotas_boceto"] == ["Ø6", "centro a 5 de PERFIL", "centro a 10 de arista 5001"]
+    assert pl["ids_caras"] == [910]
+
+
+def test_cara_oblicua_errores():
+    pet = {"tipo": "quitar", "plano": 910, "profundidad": 4, "sentido": "+Y",
+           "contornos": [{"tipo": "circulo", "centro": [5, 10], "diametro": 6}]}
+    with pytest.raises(PlanError, match="fuera"):
+        planificar_extrusion(pet, CUNA, "N", aristas=CUNA_ARISTAS)
+    # cara inclinada en dos ejes y sin nada perpendicular
+    doble = json.loads(json.dumps(CUNA))
+    doble["caras_planas"][1]["normal_exterior"] = [0.5, 0.70710678, -0.5]
+    with pytest.raises(PlanError, match="perpendicular a la cara"):
+        planificar_extrusion({**pet, "sentido": "dentro"}, doble, "N", aristas=CUNA_ARISTAS)
+
+
+def test_fuera_y_dentro_en_cara_normal_a_un_eje():
+    pl = planificar_extrusion({"tipo": "quitar", "plano": 962, "profundidad": 5, "sentido": "dentro",
+                               "contornos": [{"tipo": "circulo", "centro": [0, 0], "diametro": 6}]}, CARAS, "N")
+    assert "rango Y 15.000000 20.000000" in pl["plan"]          # cara +Y en y = 20: dentro = -Y
+    with pytest.raises(PlanError, match="cara de la pieza"):
+        planificar_extrusion({"tipo": "anadir", "plano": "PLANTA", "profundidad": 5, "sentido": "fuera",
+                              "contornos": [{"tipo": "circulo", "centro": [0, 0], "diametro": 6}]}, VACIA_IAC, "N")
+
+
+@pytest.mark.anyio
+async def test_proponer_extrusion_en_cara_oblicua_lee_aristas(tmp_path, fake):
+    fake.files = ["PRUEBA_CMD.PRT"]
+    fake.active = "PRUEBA_CMD.PRT"
+    creo = CreoSimulado()
+    creo.caras = json.loads(json.dumps({**CUNA, "ok": True, "modelo": {"nombre": "PRUEBA_CMD", "tipo": "PRT"}}))
+    import test_operaciones as to
+    viejas = to.ARISTAS
+    to.ARISTAS = {**CUNA_ARISTAS, "ok": True, "modelo": {"nombre": "PRUEBA_CMD", "tipo": "PRT"}}
+    try:
+        srv = servidor(tmp_path, fake, creo)
+        err, p = await call(srv, "proponer_extrusion", tipo="quitar", plano="910", profundidad=4, sentido="dentro",
+                            contornos=[{"tipo": "rectangulo", "centro": [0, 12], "ancho": 10, "alto": 6}])
+        assert not err, p
+        assert any(a[1] == "aristas" for a in creo.llamadas)
+        assert "u" in p["coordenadas_croquis"] and "arista 5001" in p["coordenadas_croquis"]["v"]
+        err, r = await call(srv, "crear_extrusion", codigo=p["codigo"])
+        assert not err and r["estado"] == "ok", r
+        assert "sk_ref 6 5001" in creo.planes[0]
+    finally:
+        to.ARISTAS = viejas

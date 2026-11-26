@@ -28,7 +28,7 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "0.9.0"
+VERSION = "0.10.0"
 PUERTO = 9057
 ORDENES = {"estado": 30, "interferencias": 900, "taladros": 600, "posiciones": 300, "caras": 60, "seleccion": 30,
            "arbol": 60, "aristas": 60, "holguras": 600}
@@ -56,7 +56,7 @@ def entorno() -> dict[str, str]:
 PLAN_RE = re.compile(r"^(modelo [A-Za-z0-9_\-]{1,80}\.PRT|serie [A-Za-z0-9_]{1,30}|tamano [A-Za-z0-9_.]{1,30}|"
                      r"e [0-9.]{3,150} (i -?\d+|d -?\d+(\.\d+)?|b [01]|r \d+ -?\d+|w [A-Z0-9_]{1,31}|c|k( \d+){1,64})|"
                      r"verificar( -?\d+(\.\d+)?){6}|alternar(_i)? [0-9.]+ [0-9.]+|patron \d+|"
-                     r"esperado( -?\d+(\.\d+)?){3}|sin_aristas( \d+){1,64}|"
+                     r"esperado( -?\d+(\.\d+)?){3}|sin_aristas( \d+){1,64}|transf( -?\d+(\.\d+)?){12}|transf_modo (caja|superficie)|"
                      r"sk_ref \d+ \d+|sk_linea( -?\d+(\.\d+)?){6}|sk_arco( -?\d+(\.\d+)?){12}|sk_circulo( -?\d+(\.\d+)?){4}|"
                      r"sk_cota ((diam|radio) \d+|ref \d+ [cse] \d+|refl \d+ \d+|entre \d+ \d+|diaeje \d+ [csew] \d+)( -?\d+(\.\d+)?){4}|"
                      r"sk_eje( -?\d+(\.\d+)?){6}|"

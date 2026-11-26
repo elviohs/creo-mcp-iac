@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from .operaciones import PlanError, elegir_referencias, orientacion
+from .operaciones import PlanError, elegir_referencias, orientacion, _corregir_forma
 
 TIPOS_EXT = {"anadir": (917, -1), "quitar": (916, 916)}   # PRO_E_FEATURE_TYPE, PRO_E_REMOVE_MATERIAL
 EXTENSIONES = ("ciega", "simetrica", "pasante", "pasante_ambos")
@@ -286,12 +286,99 @@ def _plano_croquis(caras: dict[str, Any], plano: int | str) -> dict[str, Any]:
         raise PlanError(f"El {que} no tiene normal u origen conocidos.")
     ori = orientacion(n)
     if ori is None:
-        raise PlanError(f"El {que} no es perpendicular a un eje de la pieza: de momento el croquis solo va en "
-                        "planos o caras normales a X, Y o Z.")
+        # plano oblicuo (0.21.0): el marco del croquis se calcula en _marco_oblicuo
+        es_cara = any(x["id"] == pid for x in caras.get("caras_planas", []))
+        return {"id": pid, "que": que, "normal": [float(x) for x in n], "punto": [float(x) for x in o],
+                "oblicuo": True, "es_cara": es_cara}
     k = "XYZ".index(ori[1])
     ejes = [i for i in range(3) if i != k]
     return {"id": pid, "que": que, "normal": [float(x) for x in n], "orientacion": ori, "eje": k,
             "coord": float(o[k]), "ejes_uv": ejes}
+
+
+def _v3(a, b, op):
+    return [op(a[i], b[i]) for i in range(3)]
+
+
+def _punto3(a): return [float(x) for x in a]
+def _prod(a, b): return sum(a[i] * b[i] for i in range(3))
+def _cruz(a, b): return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+
+
+def _unit3(v):
+    n = math.sqrt(_prod(v, v)) or 1.0
+    return [c / n for c in v]
+
+
+def _marco_oblicuo(caras: dict[str, Any], pl: dict[str, Any], aristas: dict[str, Any] | None,
+                   referencia: str | None = None) -> dict[str, Any]:
+    """Marco del croquis en una cara oblicua (0.21.0).
+    u: distancia a un plano (de referencia o cara) perpendicular a la cara, medida en la cara;
+    v: distancia, a lo largo de la cara, a una arista recta de la cara paralela a ese plano (la
+    «primera» en sentido v). Devuelve el origen y los ejes en coordenadas de la pieza y las referencias
+    del croquis: el plano perpendicular (también orienta el croquis) y aristas rectas de la cara."""
+    if not pl.get("es_cara"):
+        raise PlanError(f"El {pl['que']} es oblicuo: en planos oblicuos el croquis va sobre una cara plana de la "
+                        "pieza (su id, de caras_creo o seleccion_creo), no sobre un plano de referencia.")
+    n = _unit3(pl["normal"])
+    tol = 1e-5
+    perp = []
+    for p in caras.get("planos_referencia", []):
+        if p.get("normal") and p.get("origen") and abs(_prod(p["normal"], n)) < tol:
+            perp.append({"tipo": 5, "id": p["id"], "nombre": p.get("nombre"), "normal": _unit3(p["normal"]),
+                         "origen": _punto3(p["origen"]), "es_plano": True})
+    for c in caras.get("caras_planas", []):
+        if c["id"] != pl["id"] and c.get("normal_exterior") and abs(_prod(c["normal_exterior"], n)) < tol:
+            perp.append({"tipo": 5, "id": c["id"], "nombre": f"cara {c['id']}", "normal": _unit3(c["normal_exterior"]),
+                         "origen": _punto3(c["punto_plano"]), "es_plano": False})
+    if referencia:
+        sel = [p for p in perp if str(p["nombre"]).upper() == referencia.strip().upper() or str(p["id"]) == referencia.strip()]
+        if not sel:
+            raise PlanError(f"La referencia {referencia} no existe o no es perpendicular a la cara {pl['id']}.")
+        perp = sel + [p for p in perp if p is not sel[0]]
+    else:
+        orden = {"PERFIL": 0, "ALZADO": 1, "PLANTA": 2, "RIGHT": 3, "FRONT": 4, "TOP": 5}
+        perp.sort(key=lambda p: (not p["es_plano"], orden.get(str(p["nombre"]).upper(), 9)))
+    if not perp:
+        raise PlanError(f"No hay ningún plano de referencia ni cara plana perpendicular a la cara {pl['id']}: hace "
+                        "falta uno para orientar el croquis (la cara está inclinada respecto a dos ejes). Crea en "
+                        "Creo un plano de referencia perpendicular a la cara y vuelve a proponer.")
+    r1 = perp[0]
+    U = r1["normal"]
+    V = _unit3(_cruz(n, U))
+    # v hacia donde crece la coordenada de la pieza dominante en V (p. ej. «subiendo» por una rampa)
+    dom = max(range(3), key=lambda i: abs(V[i]))
+    if V[dom] < 0:
+        V = [-c for c in V]
+    # aristas rectas de la cara
+    rectas = []
+    for a in (_corregir_forma(aristas).get("aristas", []) if aristas else []):
+        if pl["id"] in (a.get("caras") or []) and a.get("tipo") == "recta" and a.get("inicio") and a.get("fin"):
+            t = _unit3(_v3(a["fin"], a["inicio"], lambda x, y: x - y))
+            rectas.append({"id": a["id"], "inicio": _punto3(a["inicio"]), "t": t, "longitud": a.get("longitud", 0)})
+    paralelas_u = [e for e in rectas if abs(abs(_prod(e["t"], U)) - 1) < 1e-6]
+    otras = [e for e in rectas if abs(_prod(e["t"], U)) < 0.999 and e not in paralelas_u]
+    p0 = pl["punto"]
+    base = [n[i] * _prod(n, p0) for i in range(3)]          # proyección del origen de la pieza sobre la cara
+    u_base = _prod(U, _v3(base, r1["origen"], lambda x, y: x - y))
+    refs = [{"tipo": 5, "id": r1["id"], "nombre": r1["nombre"]}]
+    ejes_ref = {0: (0, 0.0)}
+    if paralelas_u:
+        e0 = min(paralelas_u, key=lambda e: _prod(V, e["inicio"]))
+        v_base = _prod(V, _v3(base, e0["inicio"], lambda x, y: x - y))
+        refs.append({"tipo": 6, "id": e0["id"], "nombre": f"arista {e0['id']}"})
+        ejes_ref[1] = (1, 0.0)
+        desc_v = f"distancia a lo largo de la cara desde la arista {e0['id']}"
+    else:
+        v_base = _prod(V, base)
+        desc_v = "distancia a lo largo de la cara desde la proyección del origen de la pieza"
+    for e in otras[:2]:                                       # más referencias para situar el croquis
+        refs.append({"tipo": 6, "id": e["id"], "nombre": f"arista {e['id']}"})
+    O = [base[i] - u_base * U[i] - v_base * V[i] for i in range(3)]
+    return {"O": O, "U": U, "V": V, "n": n, "refs": refs, "ejes_ref": ejes_ref, "orienta": r1,
+            "desc": {"u": f"distancia a {r1['nombre']} (dirección {[round(c, 4) for c in U]})",
+                     "v": f"{desc_v} (dirección {[round(c, 4) for c in V]})",
+                     "origen": [round(c, 4) for c in O]}}
 
 
 def _tangente_seg(seg, al_final: bool):
@@ -518,7 +605,8 @@ def _lineas_cotas(cotas, p3, fmt) -> list[str]:
     return out
 
 
-def planificar_extrusion(peticion: dict[str, Any], caras: dict[str, Any], nombre: str) -> dict[str, Any]:
+def planificar_extrusion(peticion: dict[str, Any], caras: dict[str, Any], nombre: str,
+                         aristas: dict[str, Any] | None = None) -> dict[str, Any]:
     """Plan para el servicio nativo (líneas e/sk_*/...) y resumen para la tabla de confirmación."""
     tipo = str(peticion.get("tipo") or "")
     if tipo not in TIPOS_EXT:
@@ -530,32 +618,58 @@ def planificar_extrusion(peticion: dict[str, Any], caras: dict[str, Any], nombre
         raise PlanError("Una extrusión que añade material necesita profundidad (ciega o simétrica).")
     prof = _pos(peticion.get("profundidad"), "profundidad") if ext in ("ciega", "simetrica") else None
     pl = _plano_croquis(caras, peticion.get("plano") if peticion.get("plano") is not None else "")
-    k, c0 = pl["eje"], pl["coord"]
-    eje = "XYZ"[k]
+    oblicuo = bool(pl.get("oblicuo"))
+    marco = _marco_oblicuo(caras, pl, aristas, peticion.get("referencia")) if oblicuo else None
+    k = pl.get("eje")
+    c0 = pl.get("coord")
+    eje = "XYZ"[k] if k is not None else None
     sentido = None
     if ext in ("ciega", "pasante"):
-        sentido = str(peticion.get("sentido") or "").upper()
-        if sentido not in (f"+{eje}", f"-{eje}"):
-            raise PlanError(f"sentido: +{eje} o -{eje} (el croquis está en un plano normal a {eje}).")
+        sentido = str(peticion.get("sentido") or "").strip()
+        sl = sentido.lower()
+        if sl in ("fuera", "dentro"):
+            if not any(x["id"] == pl["id"] for x in caras.get("caras_planas", [])):
+                raise PlanError("sentido 'fuera'/'dentro' solo vale con el croquis en una cara de la pieza.")
+            if not oblicuo:                       # en una cara normal a un eje, se traduce a ±eje
+                hacia = pl["normal"][k] > 0
+                sentido = ("+" if hacia == (sl == "fuera") else "-") + eje
+            else:
+                sentido = sl
+        elif oblicuo:
+            raise PlanError("sentido: 'fuera' (hacia el exterior de la cara) o 'dentro' (hacia el material); la cara "
+                            "es oblicua.")
+        else:
+            sentido = sentido.upper()
+            if sentido not in (f"+{eje}", f"-{eje}"):
+                raise PlanError(f"sentido: +{eje} o -{eje}, o 'fuera'/'dentro' si el croquis va en una cara "
+                                f"(el croquis está en un plano normal a {eje}).")
     planas = caras.get("caras_planas", [])
     if tipo == "quitar" and not planas:
         raise PlanError("La pieza no tiene material: un corte no quitaría nada. Empieza por una extrusión que añada.")
 
     cts, area = _preparar_contornos(peticion)
 
-    u, v = pl["ejes_uv"]
+    if oblicuo:
+        O, U, V = marco["O"], marco["U"], marco["V"]
 
-    def p3(p):
-        x = [0.0, 0.0, 0.0]
-        x[k], x[u], x[v] = c0, p[0], p[1]
-        return x
+        def p3(p):
+            return [O[i] + p[0] * U[i] + p[1] * V[i] for i in range(3)]
+        refs = marco["refs"]
+        u = v = None
+    else:
+        u, v = pl["ejes_uv"]
+
+        def p3(p):
+            x = [0.0, 0.0, 0.0]
+            x[k], x[u], x[v] = c0, p[0], p[1]
+            return x
+        refs = elegir_referencias(caras, pl["normal"])
 
     def fmt(vals):
         return " ".join(f"{x:.6f}" for x in vals)
 
     sk = _lineas_entidades(cts, p3, fmt)
 
-    refs = elegir_referencias(caras, pl["normal"])
     ftype, remove = TIPOS_EXT[tipo]
     modelo = caras["modelo"]["nombre"] + ".PRT"
     e = [f"e 386.387 i {ftype}", "e 386.388 i 1", "e 386.1956 i 917", f"e 386.2023 i {remove}", "e 386.3176 i 0"]
@@ -574,12 +688,17 @@ def planificar_extrusion(peticion: dict[str, Any], caras: dict[str, Any], nombre
         e += ["e 386.6314.6315 i 2", f"e 386.6314.6316 r 98 {cuerpo}"]
 
     lineas = [f"modelo {modelo}", *e]
-    lineas += [f"sk_ref 5 {r['id']}" for r in refs]
+    lineas += [f"sk_ref {r.get('tipo', 5)} {r['id']}" for r in refs]
     lineas += sk
-    cotas = _cotas_boceto(cts, _ejes_de_referencia(refs, u, v))
+    cotas = _cotas_boceto(cts, marco["ejes_ref"] if oblicuo else _ejes_de_referencia(refs, u, v))
     lineas += _lineas_cotas(cotas, p3, fmt)
     vol = area * prof if prof else None
-    if ext in ("ciega", "pasante"):
+    if oblicuo:
+        # Sin comprobación de tramo (la cara no es normal a un eje): el sentido lo comprueba el volumen.
+        # STD_DIRECTION = 1 va hacia la normal exterior de la cara (visto en 0.17).
+        if ext in ("ciega", "pasante"):
+            lineas += [f"sentido {1 if sentido == 'fuera' else -1}", "probar_sentidos"]
+    elif ext in ("ciega", "pasante"):
         mas = sentido.startswith("+")
         # Con la vista del croquis por el lado 1, PRO_E_STD_DIRECTION = 1 va hacia la normal del plano o
         # de la cara (visto en Creo 12.4 el 2026-11-25: ALZADO +Z, cara +X y corte -Z en cara +Z).
@@ -601,15 +720,21 @@ def planificar_extrusion(peticion: dict[str, Any], caras: dict[str, Any], nombre
     avisos = []
     if tipo == "anadir" and not planas and ext == "ciega":
         avisos.append("Primera operación de una pieza vacía: se comprueba que el volumen sea exactamente área × profundidad.")
-    nombres_uv = "".join("XYZ"[i] for i in (u, v))
+    if oblicuo:
+        croquis_en = f"{pl['que']} (oblicua, normal {[round(c, 4) for c in marco['n']]})"
+        coords = {"u": marco["desc"]["u"], "v": marco["desc"]["v"], "origen_u0_v0": marco["desc"]["origen"]}
+    else:
+        nombres_uv = "".join("XYZ"[i] for i in (u, v))
+        croquis_en = f"{pl['que']} ({eje} = {c0:g})"
+        coords = f"({nombres_uv[0].lower()}, {nombres_uv[1].lower()})"
     resumen = {
         "modelo": modelo, "nombre": nombre,
         "operacion": "extrusión (añade material)" if tipo == "anadir" else "corte (quita material)",
-        "croquis_en": f"{pl['que']} ({eje} = {c0:g})", "coordenadas_croquis": f"({nombres_uv[0].lower()}, {nombres_uv[1].lower()})",
+        "croquis_en": croquis_en, "coordenadas_croquis": coords,
         "contornos": [{"n": i + 1, "descripcion": c["desc"], "area_mm2": round(c["area"], 3), "hueco": c["hueco"]}
                       for i, c in enumerate(cts)],
         "area_neta_mm2": round(area, 3),
-        "extension": (f"ciega {prof:g} mm hacia {sentido}" if ext == "ciega" else
+        "extension": (f"ciega {prof:g} mm hacia {sentido}" + (" de la cara" if oblicuo else "") if ext == "ciega" else
                       f"simétrica {prof:g} mm ({prof / 2:g} a cada lado)" if ext == "simetrica" else
                       f"pasante hasta el final de la pieza hacia {sentido}" if ext == "pasante" else
                       "pasante a los dos lados"),
@@ -617,9 +742,13 @@ def planificar_extrusion(peticion: dict[str, Any], caras: dict[str, Any], nombre
         "referencias_croquis": [r.get("nombre") for r in refs],
         "cotas_boceto": [_describir_cota(ct, refs) for ct in cotas],
     }
+    if oblicuo:
+        avisos.append("Croquis en una cara oblicua: comprueba en la tabla el origen y los ejes u, v del croquis antes "
+                      "de confirmar. El sentido se comprueba por el cambio de volumen.")
+    refs_planas = [r["id"] for r in refs if r.get("tipo", 5) == 5]
     return {"plan": "\n".join(lineas) + "\n", "resumen": resumen, "avisos": avisos,
             "ids_caras": [pl["id"]] if any(x["id"] == pl["id"] for x in planas) else [],
-            "ids_planos": [r["id"] for r in refs] + ([] if any(x["id"] == pl["id"] for x in planas) else [pl["id"]])}
+            "ids_planos": refs_planas + ([] if any(x["id"] == pl["id"] for x in planas) else [pl["id"]])}
 
 
 # --------------------------------------------------------------- revoluciones
@@ -661,6 +790,8 @@ def planificar_revolucion(peticion: dict[str, Any], caras: dict[str, Any], nombr
     if tipo not in TIPOS_EXT:
         raise PlanError("tipo: 'anadir' (revolución, añade material) o 'quitar' (corte por revolución).")
     pl = _plano_croquis(caras, peticion.get("plano") if peticion.get("plano") is not None else "")
+    if pl.get("oblicuo"):
+        raise PlanError("Las revoluciones van en un plano o cara normal a X, Y o Z (el eje de giro es paralelo a un eje).")
     k, c0 = pl["eje"], pl["coord"]
     u, v = pl["ejes_uv"]
     eje_txt = str(peticion.get("eje") or "").upper().lstrip("+-")

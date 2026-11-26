@@ -15,7 +15,7 @@ Asistente ──stdio──▶ creo-mcp-iac ──HTTP localhost──▶ CREOSO
   nativas, operaciones de taladro, caras, aristas y selección, y creación de taladros, patrones,
   redondeos, chaflanes, extrusiones y cortes con croquis.
 
-Versión 0.20.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nativo:
+Versión 0.22.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nativo:
 [`native/README.md`](native/README.md).
 
 ## Principios
@@ -48,10 +48,10 @@ Versión 0.20.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nati
 | `taladros_creo` | Taladros y roscas cosméticas: tipo, rosca, tamaño, profundidades, avellanados, eje | Fichero nuevo (opcional) |
 | `caras_creo`, `seleccion_creo`, `operaciones_creo` | Caras planas y referencias; lo seleccionado en Creo; operaciones y patrones | No |
 | `proponer_taladros` / `crear_taladros` | Taladros rectos y normalizados ISO (roscado, holgura, taladrado), con cajeado o avellanado | Operaciones `IA_*`, sin guardar |
-| `proponer_patron` / `crear_patron` | Patrones lineales (1 o 2 direcciones) o circulares de un taladro | Patrón `IA_PAT_*`, sin guardar |
+| `proponer_patron` / `crear_patron` | Patrones lineales (1 o 2 direcciones) o circulares de un taladro o, desde 0.22.0, de un corte, extrusión, redondeo o chaflán | Patrón `IA_PAT_*`, sin guardar |
 | `aristas_creo` | Aristas con sus caras, punto medio, dirección y si son cóncavas (esquina interior) o convexas | No |
 | `proponer_redondeos` / `crear_redondeos` | Redondeo de radio constante en las aristas elegidas (p. ej. esquinas interiores que la fresa no puede dejar vivas) | Redondeo `IA_RED_*`, sin guardar |
-| `proponer_chaflanes` / `crear_chaflanes` | Chaflán de distancia constante (45×D o D×D) en las aristas elegidas (romper aristas vivas, entradas de taladros y ejes) | Chaflán `IA_CHF_*`, sin guardar |
+| `proponer_chaflanes` / `crear_chaflanes` | Chaflán 45×D, D×D, D1×D2 o ángulo×D (estos dos con una cara de referencia común a las aristas) en las aristas elegidas (romper aristas vivas, entradas de taladros y ejes) | Chaflán `IA_CHF_*`, sin guardar |
 | `proponer_extrusion` / `crear_extrusion` | Extrusión (añade material) o corte (quita) con un croquis de círculos, rectángulos, ranuras y perfiles de rectas y arcos, en un plano o cara normal a X, Y o Z; ciega, simétrica o pasante | Operación `IA_EXT_*` o `IA_CORTE_*`, sin guardar |
 | `crear_pieza` | Pieza nueva y vacía en la sesión, copia de la plantilla del IAC, abierta en una ventana | Pieza nueva en sesión, sin guardar ni registrar |
 | `proponer_revolucion` / `crear_revolucion` | Revolución (pieza torneada) o corte por revolución: media sección a un lado de un eje de giro paralelo a X, Y o Z, con cotas radiales como diámetros; 360° o un ángulo simétrico | Operación `IA_REV_*` o `IA_CORTE_REV_*`, sin guardar |
@@ -89,9 +89,17 @@ esquinas que señale una revisión de fabricabilidad se localizan por su punto m
 fresa; lo decide el usuario) y `crear_redondeos` lo crea tras la confirmación, comprobando
 releyendo la pieza que esas aristas han desaparecido.
 
-Los chaflanes siguen el mismo camino: `proponer_chaflanes` (distancia D, esquema 45×D —el
-habitual, «Ch D×45°»— o D×D; normalmente en aristas exteriores, avisa si alguna es interior) y
-`crear_chaflanes`.
+Los chaflanes siguen el mismo camino: `proponer_chaflanes` (esquema 45×D —el habitual, «Ch
+D×45°»—, D×D, D1×D2 o ángulo×D; normalmente en aristas exteriores, avisa si alguna es interior) y
+`crear_chaflanes`. En D1×D2 y ángulo×D hace falta `cara_referencia`, una de las dos caras de las
+aristas (común a todas): D1, o D, se mide sobre ella y el ángulo se mide desde ella.
+
+Los patrones (`proponer_patron`) también repiten, desde 0.22.0, cortes, extrusiones, redondeos y
+chaflanes (`guia` = id de `operaciones_creo`). Como no tienen eje, `creo_iac_tk` 0.11.0 sitúa cada
+miembro por un punto (centro de la caja de sus superficies en los lineales; punto medio de su
+primera superficie, que gira con él, en los circulares) y lo compara con el de la guía desplazado o
+girado; si no casa, prueba el otro sentido de las direcciones. Un patrón de redondeos o chaflanes
+solo sale si en cada posición hay una arista equivalente.
 
 ## Piezas desde un boceto: extrusiones y cortes
 
@@ -127,6 +135,20 @@ automático. Si aun así chocan, se quitan y el croquis queda con el acotado aut
 (las del boceto marcadas) y la desviación de la geometría resuelta frente a la pedida
 (`desviacion_croquis_mm`). Los arcos por tres puntos redondean centro y radio a la milésima si
 están a menos de 5·10⁻⁵ (puntos de tangencia dados con decimales).
+
+### Caras oblicuas (0.21.0)
+
+El croquis de una extrusión o un corte puede ir en una **cara plana oblicua** (no normal a X, Y o Z),
+por su id. Hace falta un plano de referencia o una cara perpendicular a ella (en una rampa inclinada
+alrededor de X, PERFIL), que orienta el croquis y mide la coordenada **u** (distancia a ese plano);
+**v** es la distancia a lo largo de la cara desde su arista recta paralela a ese plano (la de abajo
+según el sentido de v, que va hacia donde crece la coordenada dominante). Las aristas rectas de la cara
+se proyectan como referencias del croquis, así que las cotas del boceto se ponen desde el plano y desde
+la arista. La tabla da el origen y los ejes u, v en coordenadas de la pieza. El sentido es `fuera`
+(hacia el exterior de la cara) o `dentro` (hacia el material) y se comprueba por el cambio de volumen
+(no hay tramo a lo largo de un eje). `fuera`/`dentro` también valen en caras normales a un eje. Una
+cara inclinada respecto a dos ejes necesita un plano de referencia perpendicular creado a mano. Las
+revoluciones siguen en planos normales a X, Y o Z.
 
 ### Revoluciones (0.19.0)
 
