@@ -28,13 +28,15 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 PUERTO = 9057
 ORDENES = {"estado": 30, "interferencias": 900, "taladros": 600, "posiciones": 300, "caras": 60, "seleccion": 30,
            "arbol": 60, "aristas": 60, "holguras": 600}
 MAX_PARES = 20000
 # Escritura en Creo (nunca guarda): solo si el servicio se arranca con --escritura.
-ESCRITURA = {"crear": 120, "borrar": 60}
+ESCRITURA = {"crear": 120, "borrar": 60, "pieza_nueva": 120}
+PLANTILLA_RE = re.compile(r"^(wtpub://[A-Za-z0-9_\-./ ]{1,200}|[A-Za-z]:\\[^\"<>|?*\r\n]{1,200})\.prt(\.\d+)?$",
+                          re.IGNORECASE)
 PERMITE_ESCRITURA = "--escritura" in sys.argv
 MODELO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]{0,79}\.(PRT|ASM)$", re.IGNORECASE)
 AQUI = Path(__file__).resolve().parent
@@ -119,6 +121,14 @@ def ejecutar(peticion: dict, runner=subprocess.run) -> tuple[int, dict]:
         if not (isinstance(ids, list) and 0 < len(ids) <= 64 and all(isinstance(i, int) and i > 0 for i in ids)):
             return 400, {"ok": False, "fase": "servicio", "codigo": -1, "error": "ids no válidos"}
         args += ["--ids", ",".join(map(str, ids))]
+    if orden == "pieza_nueva":
+        plantilla = peticion.get("plantilla")
+        nombre = peticion.get("modelo")
+        if not (isinstance(plantilla, str) and PLANTILLA_RE.match(plantilla)):
+            return 400, {"ok": False, "fase": "servicio", "codigo": -1, "error": "Plantilla no válida"}
+        if not (isinstance(nombre, str) and nombre.upper().endswith(".PRT") and len(nombre) <= 35):
+            return 400, {"ok": False, "fase": "servicio", "codigo": -1, "error": "Nombre de pieza nueva no válido"}
+        args += ["--plantilla", plantilla]
     modelo = peticion.get("modelo")
     if modelo:
         if not isinstance(modelo, str) or not MODELO_RE.match(modelo):

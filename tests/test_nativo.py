@@ -188,7 +188,7 @@ def test_ordenes_permitidas_y_nombres(tmp_path):
     with pytest.raises(nativo.NativoError):
         n.ejecutar("taladros", "../X.PRT")
     assert set(nativo.ORDENES) == {"estado", "interferencias", "taladros", "posiciones", "caras", "seleccion", "arbol", "aristas", "holguras"}
-    assert set(nativo.ESCRITURA) == {"crear", "borrar"}
+    assert set(nativo.ESCRITURA) == {"crear", "borrar", "pieza_nueva"}
     env = n.entorno()
     assert env["PATH"].startswith(str(tmp_path / "x86e_win64" / "lib"))
     assert nativo.nombre_fichero("placa", 98) == "PLACA.PRT"

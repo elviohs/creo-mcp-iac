@@ -44,7 +44,11 @@ ORDENES: dict[str, float] = {
 MAX_PARES = 20000
 # Escritura en Creo (nunca guarda). Solo con CREO_MCP_ALLOW_OPERACIONES=1 en el servidor y
 # el servicio arrancado con --escritura.
-ESCRITURA: dict[str, float] = {"crear": 120, "borrar": 60}
+ESCRITURA: dict[str, float] = {"crear": 120, "borrar": 60, "pieza_nueva": 120}
+
+# Plantilla de pieza: ruta de Windchill (wtpub://) o de disco, acabada en .prt (lectura; nunca se guarda)
+PLANTILLA_RE = re.compile(r"^(wtpub://[A-Za-z0-9_\-./ ]{1,200}|[A-Za-z]:\\[^\"<>|?*\r\n]{1,200})\.prt(\.\d+)?$",
+                          re.IGNORECASE)
 
 _MODELO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]{0,79}\.(PRT|ASM)$", re.IGNORECASE)
 
@@ -121,7 +125,8 @@ class Nativo:
         return env
 
     def _por_servicio(self, orden: str, modelo: str | None, rapido: bool, plan: str | None = None,
-                      ids: list[int] | None = None, pares: list | None = None) -> dict[str, Any]:
+                      ids: list[int] | None = None, pares: list | None = None,
+                      plantilla: str | None = None) -> dict[str, Any]:
         t0 = time.perf_counter()
         error = None
         datos: dict[str, Any] = {"orden": orden, "modelo": modelo.upper() if modelo else None, "rapido": bool(rapido)}
@@ -131,6 +136,8 @@ class Nativo:
             datos["ids"] = ids
         if pares is not None:
             datos["pares"] = pares
+        if plantilla is not None:
+            datos["plantilla"] = plantilla
         try:
             with self.lock:
                 r = self._http("POST", "/orden", datos, (ORDENES.get(orden) or ESCRITURA[orden]) + 15)
@@ -187,7 +194,7 @@ class Nativo:
     # -- ejecución ------------------------------------------------------
     def ejecutar(self, orden: str, modelo: str | None = None, rapido: bool = False,
                  plan: str | None = None, ids: list[int] | None = None,
-                 pares: list | None = None) -> dict[str, Any]:
+                 pares: list | None = None, plantilla: str | None = None) -> dict[str, Any]:
         if orden in ESCRITURA:
             if not self.escritura:
                 raise NativoError("La escritura en Creo está desactivada (CREO_MCP_ALLOW_OPERACIONES=1).")
@@ -204,8 +211,15 @@ class Nativo:
             raise NativoError("Pares de componentes no válidos.")
         if (orden == "borrar" or ids) and not (ids and all(isinstance(i, int) and i > 0 for i in ids)):
             raise NativoError("Ids de operaciones no válidos.")
+        if orden == "pieza_nueva":
+            if not modelo or not modelo.upper().endswith(".PRT") or len(modelo) > 35:
+                raise NativoError("Nombre de la pieza nueva no válido (hasta 31 caracteres y .PRT).")
+            if not plantilla or not PLANTILLA_RE.match(plantilla):
+                raise NativoError("Ruta de la plantilla de pieza no válida.")
+        elif plantilla is not None:
+            raise NativoError("La plantilla solo vale para pieza_nueva.")
         if self.url:
-            return self._por_servicio(orden, modelo, rapido, plan, ids, pares)
+            return self._por_servicio(orden, modelo, rapido, plan, ids, pares, plantilla)
         ok, motivo = self.disponible()
         if not ok:
             raise NativoError(f"Las lecturas nativas de Creo no están disponibles: {motivo}")
@@ -222,6 +236,8 @@ class Nativo:
             args += ["--plan", str(fichero)]
         if ids:
             args += ["--ids", ",".join(map(str, ids))]
+        if plantilla is not None:
+            args += ["--plantilla", plantilla]
         if pares is not None:
             carpeta = self.exe.parent / "planes"
             carpeta.mkdir(exist_ok=True)

@@ -234,7 +234,8 @@ class FakeCreoson:
             return ok()
         if key == ("creo", "get_config"):
             vals = {"template_drawing": [str(self.template_dir / "iac_a3_pieza.drw")],
-                    "pro_format_dir": [str(self.template_dir)]}
+                    "pro_format_dir": [str(self.template_dir)],
+                    "template_solidpart": ["wtpub://Mistral/Bibliotecas/FORMATOS/plantilla_pieza_generica.prt"]}
             return ok({"values": vals.get(data["name"], [])})
         if key == ("view", "list"):
             return ok({"viewlist": ["FRONT", "TOP", "RIGHT", "ISO"]})

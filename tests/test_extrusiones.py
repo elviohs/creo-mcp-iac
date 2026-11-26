@@ -275,3 +275,32 @@ async def test_proponer_y_crear_revolucion(tmp_path, fake):
     err, r = await call(srv, "crear_revolucion", codigo=p["codigo"])
     assert not err and r["estado"] == "ok", r
     assert "e 386.388 i 2" in creo.planes[0] and "sk_eje" in creo.planes[0]
+
+
+# --- pieza nueva desde la plantilla (0.20.0) ---------------------------------------------------
+
+@pytest.mark.anyio
+async def test_crear_pieza_con_la_plantilla_de_creo(tmp_path, fake):
+    fake.files = ["PRUEBA_CMD.PRT"]
+    fake.active = "PRUEBA_CMD.PRT"
+    creo = CreoSimulado()
+    srv = servidor(tmp_path, fake, creo)
+    err, r = await call(srv, "crear_pieza", nombre="soporte_prueba")
+    assert not err and r["estado"] == "ok" and r["modelo"] == "SOPORTE_PRUEBA.PRT", r
+    assert creo.pieza_nueva == ("SOPORTE_PRUEBA.PRT", "wtpub://Mistral/Bibliotecas/FORMATOS/plantilla_pieza_generica.prt")
+    assert "SIN GUARDAR" in r["aviso"]
+    err, msg = await call(srv, "crear_pieza", nombre="mal nombre")
+    assert err
+    err, msg = await call(srv, "crear_pieza", nombre="X", plantilla="../otra.prt")
+    assert err and "plantilla" in msg.lower()
+
+
+def test_servicio_valida_la_plantilla():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("servicio_tk", Path(__file__).parents[1] / "native" / "servicio_tk.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    m.PERMITE_ESCRITURA = True
+    codigo, r = m.ejecutar({"orden": "pieza_nueva", "modelo": "A.PRT", "plantilla": "wtpub://x/y.prt;borrar"},
+                           runner=lambda *a, **k: None)
+    assert codigo == 400 and "Plantilla" in r["error"]

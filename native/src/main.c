@@ -27,6 +27,8 @@
      crear --plan F  Crea UNA operacion a partir de un plan (arbol de elementos) y
                      comprueba que el eje queda donde se pidio.
      borrar --ids L  Borra operaciones creadas por el asistente (nombre IA_*).
+     pieza_nueva --modelo N.PRT --plantilla RUTA  Pieza nueva en sesion, copia de la plantilla
+                     (sin guardar), y la abre en una ventana.
   Por defecto se usa el modelo activo; --modelo elige otro modelo ya en sesion.
 */
 #include <stdio.h>
@@ -69,6 +71,7 @@
 #include "ProMaterial.h"
 #include "ProElempath.h"
 #include "ProSection.h"
+#include "ProWindows.h"
 #include "ProSecdim.h"
 #include "ProSecdimType.h"
 #include "ProSecerror.h"
@@ -76,7 +79,7 @@
 #include <time.h>
 #include "salida.h"
 
-#define VERSION_TK "0.9.0"
+#define VERSION_TK "0.10.0"
 #define MAX_MODELOS 20000
 
 static ProProcessHandle sesion;
@@ -2297,12 +2300,82 @@ static int orden_borrar(const char *modelo, const char *ids_txt)
 
 /* ------------------------------------------------------------------ main */
 
+/* ---- pieza nueva: copia en sesion de la plantilla de pieza (0.10.0) ---- */
+static int orden_pieza_nueva(const char *modelo, const char *plantilla)
+{
+    char base[PRO_MDLNAME_SIZE];
+    ProMdlName wnombre;
+    ProPath wruta;
+    ProMdl ya = NULL, tmpl = NULL, nueva = NULL;
+    ProError e;
+    int i, n = 0, cargada = 0, ventana = -1;
+    const char *p;
+    if (!modelo || !plantilla || !*plantilla) { error_json("argumentos", -1, "Faltan --modelo NOMBRE.PRT y --plantilla"); return 2; }
+    p = strrchr(modelo, '.');
+    if (!p || _stricmp(p, ".PRT") != 0) { error_json("argumentos", -1, "El nombre de la pieza nueva acaba en .PRT"); return 2; }
+    n = (int)(p - modelo);
+    if (n < 1 || n > 31) { error_json("argumentos", -1, "Nombre de 1 a 31 caracteres"); return 2; }
+    for (i = 0; i < n; i++) {
+        char c = modelo[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-')) {
+            error_json("argumentos", -1, "Nombre con caracteres no validos (solo letras, numeros, _ y -)"); return 2;
+        }
+        base[i] = c;
+    }
+    base[n] = '\0';
+    ProStringToWstring(wnombre, base);
+    if (ProMdlnameInit(wnombre, PRO_MDLFILE_PART, &ya) == PRO_TK_NO_ERROR) {
+        error_json("nombre", 0, "Ya hay en sesion una pieza con ese nombre: no se ha creado nada"); return 5;
+    }
+    ProStringToWstring(wruta, (char *)plantilla);
+    /* la plantilla puede estar ya en sesion (p. ej. abierta por el usuario) */
+    {
+        const char *b = strrchr(plantilla, '/'), *b2 = strrchr(plantilla, '\\');
+        char nt[PRO_MDLNAME_SIZE];
+        ProMdlName wnt;
+        const char *q;
+        if (b2 && (!b || b2 > b)) b = b2;
+        b = b ? b + 1 : plantilla;
+        q = strchr(b, '.');
+        n = q ? (int)(q - b) : (int)strlen(b);
+        if (n > PRO_MDLNAME_SIZE - 1) n = PRO_MDLNAME_SIZE - 1;
+        memcpy(nt, b, n); nt[n] = '\0';
+        ProStringToWstring(wnt, nt);
+        if (ProMdlnameInit(wnt, PRO_MDLFILE_PART, &tmpl) != PRO_TK_NO_ERROR) tmpl = NULL;
+    }
+    if (!tmpl) {
+        e = ProMdlFiletypeLoad(wruta, PRO_MDLFILE_UNUSED, PRO_B_FALSE, &tmpl);
+        if (e != PRO_TK_NO_ERROR || !tmpl) { error_json("plantilla", (int)e, "Creo no ha podido cargar la plantilla"); return 5; }
+        cargada = 1;
+    }
+    e = ProMdlnameCopy(tmpl, wnombre, &nueva);
+    if (e != PRO_TK_NO_ERROR || !nueva) {
+        if (cargada) ProMdlErase(tmpl);
+        error_json("copia", (int)e, "Creo no ha podido copiar la plantilla con el nombre nuevo: no se ha creado nada");
+        return 5;
+    }
+    if (cargada) ProMdlErase(tmpl);       /* solo se quita de la sesion; no se borra ningun fichero */
+    if (ProObjectwindowMdlnameCreate(wnombre, PRO_PART, &ventana) == PRO_TK_NO_ERROR) {
+        ProMdlDisplay(nueva);
+        ProWindowActivate(ventana);
+    }
+    cabecera_ok();
+    modelo_json("modelo", nueva);
+    j_str("plantilla", plantilla);
+    j_bool("plantilla_cargada", cargada);
+    j_int("ventana", ventana);
+    j_bool("guardado", 0);
+    j_cerrar_obj();
+    j_fin();
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
-    const char *modelo = NULL, *plan = NULL, *ids = NULL, *pares = NULL;
+    const char *modelo = NULL, *plan = NULL, *ids = NULL, *pares = NULL, *plantilla = NULL;
     int rapido = 0, i, rc;
     static const char *ordenes[] = {"estado", "interferencias", "taladros", "posiciones", "caras",
-                                    "seleccion", "crear", "borrar", "arbol", "aristas", "holguras", NULL};
+                                    "seleccion", "crear", "borrar", "arbol", "aristas", "holguras", "pieza_nueva", NULL};
     int valida = 0;
 
     orden_actual = argc > 1 ? argv[1] : "";
@@ -2311,12 +2384,13 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[i], "--plan") == 0 && i + 1 < argc) plan = argv[++i];
         else if (strcmp(argv[i], "--ids") == 0 && i + 1 < argc) ids = argv[++i];
         else if (strcmp(argv[i], "--pares") == 0 && i + 1 < argc) pares = argv[++i];
+        else if (strcmp(argv[i], "--plantilla") == 0 && i + 1 < argc) plantilla = argv[++i];
         else if (strcmp(argv[i], "--rapido") == 0) rapido = 1;
     }
     for (i = 0; ordenes[i]; i++) if (!strcmp(orden_actual, ordenes[i])) valida = 1;
     if (!valida) {
         error_json("argumentos", -1, "Orden desconocida. Ordenes: estado, interferencias, taladros, posiciones, "
-                   "caras, seleccion, crear, borrar, arbol, aristas, holguras");
+                   "caras, seleccion, crear, borrar, arbol, aristas, holguras, pieza_nueva");
         return 2;
     }
     if (!conectar()) return 3;
@@ -2331,6 +2405,7 @@ int main(int argc, char *argv[])
     else if (!strcmp(orden_actual, "arbol")) rc = orden_arbol(modelo, ids);
     else if (!strcmp(orden_actual, "aristas")) rc = orden_aristas(modelo);
     else if (!strcmp(orden_actual, "holguras")) rc = orden_holguras(modelo, pares);
+    else if (!strcmp(orden_actual, "pieza_nueva")) rc = orden_pieza_nueva(modelo, plantilla);
     else rc = orden_borrar(modelo, ids);
 
     ProEngineerDisconnect(&sesion, 10);

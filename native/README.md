@@ -19,6 +19,7 @@ operaciones `IA_*` en una pieza en sesión. **Nunca guarda modelos.**
 | `crear --plan F` con croquis (0.7.0) | **Escribe.** Extrusión o corte: crea la operación incompleta, dibuja el croquis (`sk_*`) en su sección (`ProSectionEntityAdd`, `ProSectionAutodim`, `ProSectionSolve`), fija sentido y lado del material en el árbol extraído y la completa con `ProFeatureWithoptionsRedefine`. Comprueba la extensión de sus caras en el eje (`rango`) y el cambio de volumen (`volumen_max`, `volumen_signo`); si falla, la borra y prueba el otro sentido (`probar_sentidos`) | `crear_extrusion` |
 | `aristas` | Aristas de la pieza: id, recta/arco, longitud, extremos, punto medio, tangente, caras vecinas y forma (cóncava, convexa o tangente) | `aristas_creo`, `proponer_redondeos` |
 | `arbol [--ids L]` | Operaciones de la pieza (id, nombre, tipo, estado, patrón) o el árbol de elementos de las indicadas y de su patrón | `operaciones_creo` |
+| `pieza_nueva --modelo N.PRT --plantilla RUTA` | **Escribe en sesión.** Carga la plantilla (`ProMdlFiletypeLoad`, también desde `wtpub://`), la copia con el nombre nuevo (`ProMdlnameCopy`), la quita de la sesión si la cargó él y abre la pieza nueva en una ventana. No guarda (0.10.0) | `crear_pieza` |
 | `borrar --ids 12,15` | **Escribe.** Borra operaciones cuyo nombre empieza por `IA_` y sin hijas ajenas; los patrones `IA_PAT_*` con `ProPatternDelete` (queda la guía) | `borrar_operaciones_ia` |
 
 Opción común: `--modelo NOMBRE.EXT` (modelo ya en sesión); sin ella, el modelo activo.

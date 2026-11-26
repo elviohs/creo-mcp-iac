@@ -15,7 +15,7 @@ Asistente ──stdio──▶ creo-mcp-iac ──HTTP localhost──▶ CREOSO
   nativas, operaciones de taladro, caras, aristas y selección, y creación de taladros, patrones,
   redondeos, chaflanes, extrusiones y cortes con croquis.
 
-Versión 0.19.1. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nativo:
+Versión 0.20.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nativo:
 [`native/README.md`](native/README.md).
 
 ## Principios
@@ -53,6 +53,7 @@ Versión 0.19.1. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nati
 | `proponer_redondeos` / `crear_redondeos` | Redondeo de radio constante en las aristas elegidas (p. ej. esquinas interiores que la fresa no puede dejar vivas) | Redondeo `IA_RED_*`, sin guardar |
 | `proponer_chaflanes` / `crear_chaflanes` | Chaflán de distancia constante (45×D o D×D) en las aristas elegidas (romper aristas vivas, entradas de taladros y ejes) | Chaflán `IA_CHF_*`, sin guardar |
 | `proponer_extrusion` / `crear_extrusion` | Extrusión (añade material) o corte (quita) con un croquis de círculos, rectángulos, ranuras y perfiles de rectas y arcos, en un plano o cara normal a X, Y o Z; ciega, simétrica o pasante | Operación `IA_EXT_*` o `IA_CORTE_*`, sin guardar |
+| `crear_pieza` | Pieza nueva y vacía en la sesión, copia de la plantilla del IAC, abierta en una ventana | Pieza nueva en sesión, sin guardar ni registrar |
 | `proponer_revolucion` / `crear_revolucion` | Revolución (pieza torneada) o corte por revolución: media sección a un lado de un eje de giro paralelo a X, Y o Z, con cotas radiales como diámetros; 360° o un ángulo simétrico | Operación `IA_REV_*` o `IA_CORTE_REV_*`, sin guardar |
 | `taladros_conjugados` | Taladros enfrentados de piezas distintas en un conjunto: alineación frente a la holgura del tornillo y tamaños compatibles (roscado M6 con holgura M6) | Solo un fichero nuevo |
 | `holguras_creo` | Holguras mínimas entre piezas (distancia exacta de Creo) y estimación en frío por contracción de los materiales | Solo un fichero nuevo |
@@ -109,9 +110,11 @@ las caras de la operación quedan al lado pedido del plano y que el volumen camb
 en la primera extrusión de una pieza vacía; como mucho área × profundidad después). Si no, la borra
 y prueba el otro sentido.
 
-Para levantar una pieza nueva: el usuario crea en Creo una pieza vacía con la plantilla del IAC y la
-deja abierta; se hace el contorno exterior y después cortes, taladros, redondeos y chaflanes, cada
-uno con su tabla y su confirmación. De un boceto o una foto solo se toman las cotas que el usuario
+Para levantar una pieza nueva: `crear_pieza` (0.20.0) crea en la sesión una pieza vacía con la
+plantilla del IAC (`template_solidpart` de Creo, que está en Windchill: se lee a través de Creo, solo
+lectura, por decisión del responsable del 2026-11-26), con el nombre que confirme el usuario, y la abre
+en una ventana; no la guarda ni la registra. También vale una pieza vacía que haya abierto el usuario. Se
+hace el contorno exterior y después cortes, taladros, redondeos y chaflanes, cada uno con su tabla y su confirmación. De un boceto o una foto solo se toman las cotas que el usuario
 confirma.
 
 Desde 0.18.0 (`creo_iac_tk` 0.8.0) el croquis se acota con las **cotas del boceto**, como lo haría un
@@ -159,7 +162,7 @@ Variables de entorno del servidor (bloque `env` en `claude_desktop_config.json`)
 | `CREO_MCP_EXPORT_DIR` | *(vacía = sin exportar)* | Carpeta autorizada para Excel, STEP y PDF (Creo debe poder escribir en ella) |
 | `CREO_MCP_AUDIT_LOG` | `~/.creo_mcp_iac/audit.jsonl` | Registro de auditoría |
 | `CREO_MCP_ALLOW_PARAMETERS` | `0` | `1` = activa `aplicar_parametros_excel` |
-| `CREO_MCP_ALLOW_OPERACIONES` | `0` | `1` = activa `crear_taladros`, `crear_patron`, `crear_redondeos`, `crear_chaflanes`, `crear_extrusion` y `borrar_operaciones_ia` (además, el servicio con `--escritura`). Es el interruptor principal de la escritura |
+| `CREO_MCP_ALLOW_OPERACIONES` | `0` | `1` = activa `crear_taladros`, `crear_patron`, `crear_redondeos`, `crear_chaflanes`, `crear_extrusion`, `crear_revolucion`, `crear_pieza` y `borrar_operaciones_ia` (además, el servicio con `--escritura`). Es el interruptor principal de la escritura |
 | `CREO_MCP_ALLOW_DRAWINGS` | `0` | `1` = herramientas experimentales de planos nativos (no recomendadas) |
 | `CREO_MCP_CONTRACCION` | `contraccion_iac.json` del paquete | Tabla de contracción térmica (ΔL/L desde 293 K) de `holguras_creo` |
 | `CREO_MCP_ESTANDARES` | `estandares_iac.json` del paquete | Fichero de reglas de `revisar_estandares` (los formatos de código de plano de cada proyecto van aquí) |

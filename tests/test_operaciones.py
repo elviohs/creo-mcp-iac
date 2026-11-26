@@ -217,6 +217,11 @@ class CreoSimulado:
                 r = {"ok": True, "modelo": {"nombre": "PRUEBA_CMD", "tipo": "PRT"}, "operaciones": [
                     {"id": 1, "nombre": "PERFIL", "tipo": 923, "estado": 0, "patron": 0},
                     {"id": 1323, "nombre": "IA_M6X1_CB_115916_1", "tipo": 911, "estado": 0, "patron": 1}]}
+        elif orden == "pieza_nueva":
+            nombre = args[args.index("--modelo") + 1]
+            self.pieza_nueva = (nombre, args[args.index("--plantilla") + 1])
+            r = {"ok": True, "modelo": {"nombre": nombre[:-4], "tipo": "PRT"}, "plantilla_cargada": True,
+                 "ventana": 3, "guardado": False}
         elif orden == "borrar":
             r = {"ok": True, "modelo": {"nombre": "PRUEBA_CMD", "tipo": "PRT"},
                  "borradas": [int(x) for x in args[args.index("--ids") + 1].split(",")], "guardado": False}
@@ -321,7 +326,7 @@ async def test_sin_escritura_solo_propone(tmp_path, fake):
     nombres = {t.name for t in srv._tool_manager.list_tools()}
     assert {"caras_creo", "seleccion_creo", "proponer_taladros"} <= nombres
     assert not {"crear_taladros", "borrar_operaciones_ia", "crear_patron", "crear_redondeos",
-                "crear_chaflanes", "crear_extrusion", "crear_revolucion"} & nombres
+                "crear_chaflanes", "crear_extrusion", "crear_revolucion", "crear_pieza"} & nombres
     err, p = await call(srv, "proponer_taladros", taladros=TALADROS[:1])
     assert not err and p["crear_activo"] is False and "desactivada" in p["siguiente"]
     err, msg = await call(srv, "caras_creo", modelo="TOP.ASM")

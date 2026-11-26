@@ -71,7 +71,8 @@ Servidor de SOLO LECTURA sobre Creo Parametric (IAC, Departamento de Ingeniería
   `proponer_chaflanes` (45×D o D×D, normalmente en aristas exteriores) → `crear_chaflanes`.
 - Extrusiones y cortes con croquis: `proponer_extrusion` (contornos en coordenadas de la pieza
   sobre un plano o cara normal a X, Y o Z) → confirmación → `crear_extrusion`. Para levantar una
-  pieza desde un boceto: el usuario crea una pieza vacía con la plantilla del IAC; primero el
+  pieza desde un boceto: crea la pieza vacía con `crear_pieza` (plantilla del IAC; con el nombre que
+  confirme el usuario) o usa la que haya abierto él; primero el
   contorno exterior (extrusión), luego cortes, taladros, redondeos y chaflanes, de uno en uno y con
   confirmación de cada tabla. Pide las cotas que falten; no las deduzcas de una foto sin confirmarlas.
 - Piezas torneadas: `proponer_revolucion` (media sección a un lado del eje de giro, en un plano que lo
@@ -1784,7 +1785,7 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
         """Prepara una extrusión (añadir material) o un corte (quitar material) con croquis SIN
         tocar Creo. Sirve para levantar una pieza a partir de un boceto acotado: primero una extrusión
         con el contorno exterior, luego cortes, taladros, redondeos y chaflanes. Para empezar una pieza
-        nueva, el usuario crea en Creo una pieza vacía con la plantilla del IAC y la deja abierta.
+        nueva, crear_pieza (plantilla del IAC) o una pieza vacía que haya abierto el usuario.
         Calcula el área y el volumen teórico y comprueba que los contornos no se corten. El croquis se
         acota con las cotas del boceto (diámetros, radios, posición de centros y vértices desde los planos
         de referencia, ancho y alto); Creo completa lo que falte. Para que las cotas salgan como en el
@@ -2129,6 +2130,50 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
                              "Para deshacer: borrar_operaciones_ia con su id."
                              + (" Las cotas del boceto chocaron con restricciones de Creo y el croquis quedó con el "
                                 "acotado automático: revisa sus cotas." if op.get("cotas_croquis") == "automaticas_por_conflicto" else "")}
+
+        @mcp.tool(annotations=DRAW)
+        @guard
+        def crear_pieza(
+            nombre: Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_\-]{0,30}$",
+                                         description="Nombre de la pieza nueva, sin extensión (hasta 31 caracteres: "
+                                                     "letras, números, _ y -)")],
+            plantilla: Annotated[str | None, Field(description="Ruta de la plantilla (.prt). Vacío = la de Creo "
+                                                               "(template_solidpart, la plantilla del IAC)")] = None,
+        ) -> dict[str, Any]:
+            """Crea en la sesión de Creo una pieza nueva y vacía a partir de la plantilla del IAC y la
+            abre en una ventana, lista para levantar la pieza con proponer_extrusion, proponer_revolucion,
+            proponer_taladros… Úsala solo cuando el usuario lo pida o confirme el nombre. La plantilla se
+            lee de Windchill a través de Creo (solo lectura; decisión del responsable, 2026-11-26) y la
+            pieza nueva es una copia en sesión: nunca se guarda ni se registra en Windchill; el usuario la
+            guarda. No crea nada si ya hay en sesión un modelo con ese nombre."""
+            ruta = plantilla
+            if not ruta:
+                try:
+                    valores = gw.call("creo_get_config", name="template_solidpart")
+                except RuntimeError as e:
+                    raise ValueError(f"No se puede leer la plantilla de pieza de Creo (template_solidpart): {e}") from e
+                valores = [v for v in (valores if isinstance(valores, list) else [valores]) if isinstance(v, str) and v.strip()]
+                if not valores:
+                    raise ValueError("Creo no tiene plantilla de pieza (template_solidpart): indícala en `plantilla`.")
+                ruta = valores[0].strip()
+            modelo = f"{nombre.upper()}.PRT"
+            try:
+                r = nat.ejecutar("pieza_nueva", modelo, plantilla=ruta)
+            except NativoSinRespuesta as e:
+                estado_ops["desconocido"] = {"pieza_nueva": modelo, "error": str(e)[:200]}
+                gw.audit.write(event="resultado_desconocido", tool="crear_pieza", modelo=modelo)
+                return {"estado": "resultado_desconocido", "modelo": modelo,
+                        "que_hacer": "Creo no respondió a tiempo: la pieza puede haberse creado o no. Comprueba en "
+                                     "Creo si está abierta antes de repetir."}
+            except NativoError as e:
+                raise ValueError(str(e)) from e
+            gw.audit.write(event="pieza_creada", modelo=modelo, plantilla=ruta)
+            mm = r.get("modelo") or {}
+            return {"estado": "ok", "modelo": f"{mm.get('nombre', nombre.upper())}.PRT", "plantilla": ruta,
+                    "ventana_abierta": (r.get("ventana") or -1) >= 0,
+                    "siguiente": "La pieza está vacía y activa en Creo: sigue con proponer_extrusion o proponer_revolucion.",
+                    "aviso": "Pieza nueva solo en la sesión de Creo, SIN GUARDAR ni registrar en Windchill. Guárdala tú "
+                             "cuando estés conforme."}
 
         @mcp.tool(annotations=DRAW_DESTRUCTIVE)
         @guard
