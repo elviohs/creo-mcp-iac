@@ -114,6 +114,9 @@ sk_cota radio 0 7 x y z          #   valor y punto de colocación); ref: punto c
 sk_cota ref 0 c 0 35 x y z       #   la referencia sk_ref n.º 0; refl: recta a referencia;
 sk_cota refl 3 0 50 x y z        #   entre: distancia entre dos rectas. Después, acotado automático;
 sk_cota entre 1 5 100 x y z      #   si choca, se quitan y queda solo el automático
+sk_eje x1 y1 z1 x2 y2 z2         # 0.9.0: línea de centros (eje de giro de una revolución)
+sk_cota diaeje 1 s 6 20 x y z    #   diámetro del punto (c/s/e) o recta (w) de la entidad 1 respecto
+                                 #   a la línea de centros (entidad 6), con ProSecdimDiameterSet
 ```
 
 Tipos de valor: `i` entero, `d` real, `b` booleano, `w` texto, `r` referencia, `k` colección de

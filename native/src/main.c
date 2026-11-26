@@ -76,7 +76,7 @@
 #include <time.h>
 #include "salida.h"
 
-#define VERSION_TK "0.8.0"
+#define VERSION_TK "0.9.0"
 #define MAX_MODELOS 20000
 
 static ProProcessHandle sesion;
@@ -1420,7 +1420,7 @@ static int crear_patron(ProMdl mdl, ProElement raiz, int id_guia, const double *
 #define PI 3.14159265358979323846
 #endif
 #define MAX_SK 400
-typedef struct { int tipo; double v[12]; } EntSk;   /* 1 linea, 2 arco, 3 circulo */
+typedef struct { int tipo; double v[12]; } EntSk;   /* 1 linea, 2 arco, 3 circulo, 4 linea de centros */
 static EntSk sk_ent[MAX_SK];
 static int n_sk = 0;
 static int sk_refs[8][2];
@@ -1429,7 +1429,8 @@ static int n_sk_refs = 0;
 /* Cotas del boceto (0.8.0): se crean como cotas fuertes antes del acotado automatico. */
 #define MAX_COTAS 200
 typedef struct { int tipo, ent, ent2, ref, pt; double valor, lugar[3]; } CotaSk;
-/* tipo: 1 diametro, 2 radio, 3 punto a referencia, 4 recta a referencia, 5 entre dos rectas */
+/* tipo: 1 diametro, 2 radio, 3 punto a referencia, 4 recta a referencia, 5 entre dos rectas,
+   6 diametro respecto a la linea de centros (revoluciones; ent2 = linea de centros, pt 'w' = recta entera) */
 static CotaSk sk_cotas[MAX_COTAS];
 static int n_cotas = 0;
 static int sk_ids[MAX_SK];
@@ -1524,6 +1525,12 @@ static ProError construir_seccion(ProMdl mdl, ProSection sec, const char **fase)
             a.center[0] = c[0]; a.center[1] = c[1];
             a.start_angle = a1; a.end_angle = a2; a.radius = r;
             e = ProSectionEntityAdd(sec, (Pro2dEntdef *)&a, &id);
+        } else if (x->tipo == 4) {
+            Pro2dClinedef cl;
+            cl.type = PRO_2D_CENTER_LINE;
+            a_seccion(m, x->v, cl.end1);
+            a_seccion(m, x->v + 3, cl.end2);
+            e = ProSectionEntityAdd(sec, (Pro2dEntdef *)&cl, &id);
         } else {
             Pro2dCircledef ci;
             ci.type = PRO_2D_CIRCLE;
@@ -1546,7 +1553,7 @@ static ProError construir_seccion(ProMdl mdl, ProSection sec, const char **fase)
         int n = 0, did = -1;
         ProSecdimType tipo;
         Pro2dPnt lugar;
-        if (c->ent < 0 || c->ent >= n_sk || (c->tipo == 5 && (c->ent2 < 0 || c->ent2 >= n_sk)) ||
+        if (c->ent < 0 || c->ent >= n_sk || ((c->tipo == 5 || c->tipo == 6) && (c->ent2 < 0 || c->ent2 >= n_sk)) ||
             ((c->tipo == 3 || c->tipo == 4) && (c->ref < 0 || c->ref >= n_sk_refs))) { cotas_fallidas++; continue; }
         a_seccion(m, c->lugar, lugar);
         if (c->tipo == 1 || c->tipo == 2) {
@@ -1560,12 +1567,18 @@ static ProError construir_seccion(ProMdl mdl, ProSection sec, const char **fase)
             ents[0] = sk_proj[c->ref]; pts[0] = PRO_ENT_WHOLE;
             ents[1] = sk_ids[c->ent]; pts[1] = PRO_ENT_WHOLE;
             n = 2; tipo = PRO_TK_DIM_LINE_LINE;
+        } else if (c->tipo == 6) {
+            ents[0] = sk_ids[c->ent2]; pts[0] = PRO_ENT_WHOLE;
+            ents[1] = sk_ids[c->ent];
+            pts[1] = c->pt == 'w' ? PRO_ENT_WHOLE : c->pt == 'c' ? PRO_ENT_CENTER : c->pt == 's' ? PRO_ENT_START : PRO_ENT_END;
+            n = 2; tipo = c->pt == 'w' ? PRO_TK_DIM_LINE_LINE : PRO_TK_DIM_LINE_POINT;
         } else {
             ents[0] = sk_ids[c->ent]; pts[0] = PRO_ENT_WHOLE;
             ents[1] = sk_ids[c->ent2]; pts[1] = PRO_ENT_WHOLE;
             n = 2; tipo = PRO_TK_DIM_LINE_LINE;
         }
         if (ProSecdimCreate(sec, ents, pts, n, tipo, lugar, &did) != PRO_TK_NO_ERROR ||
+            (c->tipo == 6 && ProSecdimDiameterSet(sec, did) != PRO_TK_NO_ERROR) ||
             ProSecdimValueSet(sec, did, c->valor) != PRO_TK_NO_ERROR) {
             if (did >= 0) ProSecdimDelete(sec, did);
             cotas_fallidas++;
@@ -1915,14 +1928,15 @@ static int orden_crear(const char *fichero)
             else n_sk_refs++;
             continue;
         }
-        if (!strcmp(clave, "sk_linea") || !strcmp(clave, "sk_arco") || !strcmp(clave, "sk_circulo")) {
+        if (!strcmp(clave, "sk_linea") || !strcmp(clave, "sk_arco") || !strcmp(clave, "sk_circulo") || !strcmp(clave, "sk_eje")) {
             EntSk *x = &sk_ent[n_sk];
-            int nv = !strcmp(clave, "sk_linea") ? 6 : !strcmp(clave, "sk_arco") ? 12 : 4, leidos = 0, k, us;
+            int eje = !strcmp(clave, "sk_eje");
+            int nv = (!strcmp(clave, "sk_linea") || eje) ? 6 : !strcmp(clave, "sk_arco") ? 12 : 4, leidos = 0, k, us;
             const char *q = t + strlen(clave);
             if (n_sk >= MAX_SK) { lineas_mal++; continue; }
             for (k = 0; k < nv; k++) { if (sscanf(q, "%lf%n", &x->v[k], &us) != 1) break; q += us; leidos++; }
             if (leidos != nv) { lineas_mal++; continue; }
-            x->tipo = nv == 6 ? 1 : nv == 12 ? 2 : 3;
+            x->tipo = eje ? 4 : nv == 6 ? 1 : nv == 12 ? 2 : 3;
             n_sk++;
             continue;
         }
@@ -1943,6 +1957,11 @@ static int orden_crear(const char *fichero)
             } else if (!strcmp(sub, "refl")) {
                 c->tipo = 4;
                 ok = sscanf(t, "%*s %*s %d %d %lf %lf %lf %lf", &c->ent, &c->ref, &c->valor, &c->lugar[0], &c->lugar[1], &c->lugar[2]) == 6;
+            } else if (!strcmp(sub, "diaeje")) {
+                c->tipo = 6;
+                ok = sscanf(t, "%*s %*s %d %3s %d %lf %lf %lf %lf", &c->ent, pt, &c->ent2, &c->valor,
+                            &c->lugar[0], &c->lugar[1], &c->lugar[2]) == 7 && strchr("csew", pt[0]) && !pt[1];
+                c->pt = pt[0];
             } else if (!strcmp(sub, "entre")) {
                 c->tipo = 5;
                 ok = sscanf(t, "%*s %*s %d %d %lf %lf %lf %lf", &c->ent, &c->ent2, &c->valor, &c->lugar[0], &c->lugar[1], &c->lugar[2]) == 6;

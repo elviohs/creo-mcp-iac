@@ -117,7 +117,7 @@ async def test_tool_list_and_annotations(tmp_path, fake):
                           "exportar_bom_excel", "revisar_parametros_excel", "presupuesto_masas", "revisar_estandares",
                           "interferencias_creo", "taladros_creo", "taladros_conjugados", "holguras_creo", "resultado_tarea", "listar_tareas",
                           "caras_creo", "seleccion_creo", "proponer_taladros", "operaciones_creo", "proponer_patron", "aristas_creo", "proponer_redondeos",
-                          "proponer_chaflanes", "proponer_extrusion"}
+                          "proponer_chaflanes", "proponer_extrusion", "proponer_revolucion"}
     for n, t in tools.items():
         assert t.annotations.openWorldHint is False
         assert t.annotations.readOnlyHint is (n not in ("exportar_step", "exportar_pdf", "exportar_bom_excel",

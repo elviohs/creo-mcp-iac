@@ -202,3 +202,76 @@ def test_arco_por_tres_puntos_redondea_centro_y_radio():
     from creo_mcp_iac.extrusiones import _arco_3p
     _, c, r, _, _ = _arco_3p((3.428571, 14.602907), (0, 15), (-3.428571, 14.602907), "x")
     assert c == (0.0, 0.0) and r == 15.0
+
+
+# --- revoluciones (0.19.0) ------------------------------------------------------------------------
+
+from creo_mcp_iac.extrusiones import planificar_revolucion  # noqa: E402
+
+EJE_ESCALONADO = {"tipo": "perfil", "puntos": [[0, 0], [10, 0], [10, 30], [6, 30], [6, 50], [0, 50]]}
+
+
+def test_revolucion_eje_escalonado():
+    pl = planificar_revolucion({"tipo": "anadir", "plano": "ALZADO", "eje": "Y", "contornos": [EJE_ESCALONADO]},
+                               VACIA_IAC, "IA_REV_1")
+    p = pl["plan"]
+    assert plan_valido(p)
+    assert "e 386.388 i 2" in p and "e 386.3280 i 1" in p           # PRO_REVOLVE, eje interno
+    assert "e 386.6.438.440 i 4194304" in p and "e 386.6.438.442 d 360.0000" in p
+    ents = _entidades(p) + [x.split()[0] for x in p.splitlines() if x.startswith("sk_eje")]
+    assert ents[-1] == "sk_eje" and len(ents) == 7
+    assert "sk_eje 0.000000 -10.000000 0.000000 0.000000 60.000000 0.000000" in p
+    # Ø20 y Ø12 respecto al eje (como en un plano de torno) y las longitudes desde PLANTA
+    assert pl["resumen"]["cotas_boceto"] == ["Ø20 (vértice, al eje)", "vértice a 30 de PLANTA",
+                                             "Ø12 (vértice, al eje)", "vértice a 50 de PLANTA"]
+    assert all(" 6 " in c for c in lineas(p, "sk_cota diaeje"))     # referencia: la línea de centros (entidad 6)
+    vol = math.pi * 10 ** 2 * 30 + math.pi * 6 ** 2 * 20
+    assert pl["resumen"]["volumen_teorico_mm3"] == pytest.approx(vol, abs=1e-3)
+    assert "rango" not in p and f"volumen_max {vol:.6f}" in p
+
+
+def test_revolucion_casquillo_con_arcos_y_parcial():
+    # casquillo Ø30/Ø20 × 10 con un chaflán redondeado R2 en la arista exterior superior, girado 90°
+    pl = planificar_revolucion({"tipo": "anadir", "plano": "ALZADO", "eje": "Y", "angulo": 90, "contornos": [
+        {"tipo": "perfil", "puntos": [[10, 0], [15, 0], [15, 8], {"hasta": [13, 10], "centro": [13, 8], "giro": "antihorario"},
+                                      [10, 10]]}]}, VACIA_IAC, "N")
+    area = 5 * 10 - (4 - math.pi)                                     # rectángulo menos la esquina redondeada
+    assert pl["resumen"]["area_neta_mm2"] == pytest.approx(area, abs=1e-3)
+    # Pappus con ángulo de 90°: el volumen es una cuarta parte del de la vuelta entera
+    entero = planificar_revolucion({"tipo": "anadir", "plano": "ALZADO", "eje": "Y", "contornos": [
+        {"tipo": "perfil", "puntos": [[10, 0], [15, 0], [15, 8], {"hasta": [13, 10], "centro": [13, 8], "giro": "antihorario"},
+                                      [10, 10]]}]}, VACIA_IAC, "N")["resumen"]["volumen_teorico_mm3"]
+    assert pl["resumen"]["volumen_teorico_mm3"] == pytest.approx(entero / 4, rel=1e-6)
+    assert "e 386.6.438.440 i 536870912" in pl["plan"] and "e 386.6.438.442 d 90.0000" in pl["plan"]
+    assert "Ø20 (vértice, al eje)" in pl["resumen"]["cotas_boceto"] and "R2" in pl["resumen"]["cotas_boceto"]
+
+
+@pytest.mark.parametrize("pet,msg", [
+    ({"tipo": "anadir", "plano": "ALZADO", "eje": "Z", "contornos": [EJE_ESCALONADO]}, "eje"),
+    ({"tipo": "anadir", "plano": "ALZADO", "eje": "Y",
+      "contornos": [{"tipo": "rectangulo", "centro": [0, 10], "ancho": 20, "alto": 10}]}, "cruza la línea de centros"),
+    ({"tipo": "anadir", "plano": "ALZADO", "eje": "Y", "angulo": 400, "contornos": [EJE_ESCALONADO]}, "angulo"),
+    ({"tipo": "quitar", "plano": "ALZADO", "eje": "Y", "contornos": [EJE_ESCALONADO]}, "no tiene material"),
+])
+def test_revolucion_errores(pet, msg):
+    with pytest.raises(PlanError, match=msg):
+        planificar_revolucion(pet, VACIA_IAC, "N")
+
+
+@pytest.mark.anyio
+async def test_proponer_y_crear_revolucion(tmp_path, fake):
+    fake.files = ["PRUEBA_CMD.PRT"]
+    fake.active = "PRUEBA_CMD.PRT"
+    creo = CreoSimulado()
+    srv = servidor(tmp_path, fake, creo)
+    # garganta en el bloque de prueba (Y de 0 a 20): corte por revolución alrededor de Y, en ALZADO
+    err, p = await call(srv, "proponer_revolucion", tipo="quitar", plano="ALZADO", eje="Y",
+                        contornos=[{"tipo": "rectangulo", "esquina": [50, 5], "ancho": 10, "alto": 4}])
+    assert not err, p
+    assert p["codigo"].startswith("R") and p["nombre"].startswith("IA_CORTE_REV_")
+    # un código de revolución no vale para crear_extrusion (y no se consume)
+    err, msg = await call(srv, "crear_extrusion", codigo=p["codigo"])
+    assert err and "extrusión" in msg
+    err, r = await call(srv, "crear_revolucion", codigo=p["codigo"])
+    assert not err and r["estado"] == "ok", r
+    assert "e 386.388 i 2" in creo.planes[0] and "sk_eje" in creo.planes[0]

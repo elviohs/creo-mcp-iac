@@ -22,7 +22,7 @@ from . import masas as masas_mod
 from . import xlsx as xlsx_mod
 from .bom import build_bom
 from .conjugados import revisar_conjugados
-from .extrusiones import planificar_extrusion
+from .extrusiones import planificar_extrusion, planificar_revolucion
 from .holguras import (buscar_material, candidatos, cargar_tabla, contraccion, piezas, punto_de_seleccion,
                        revisar_holguras)
 from .config import Settings
@@ -74,6 +74,8 @@ Servidor de SOLO LECTURA sobre Creo Parametric (IAC, Departamento de Ingeniería
   pieza desde un boceto: el usuario crea una pieza vacía con la plantilla del IAC; primero el
   contorno exterior (extrusión), luego cortes, taladros, redondeos y chaflanes, de uno en uno y con
   confirmación de cada tabla. Pide las cotas que falten; no las deduzcas de una foto sin confirmarlas.
+- Piezas torneadas: `proponer_revolucion` (media sección a un lado del eje de giro, en un plano que lo
+  contenga; cotas radiales como diámetros) → confirmación → `crear_revolucion`.
 - Taladros en piezas: `seleccion_creo` (lo que el usuario seleccionó en Creo) o `caras_creo`
   para saber la cara y el punto; `proponer_taladros` prepara la tabla sin tocar Creo y da un
   `codigo`. Enseña la tabla y, solo con la confirmación expresa del usuario, `crear_taladros`
@@ -290,7 +292,7 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
     ) -> dict[str, Any]:
         """Recoge el resultado de una herramienta larga que respondió «en_curso» (exportar_step,
         exportar_bom_excel, presupuesto_masas, revisar_estandares, interferencias_creo,
-        taladros_creo, taladros_conjugados, holguras_creo, crear_taladros, crear_patron, crear_redondeos, crear_chaflanes, crear_extrusion). Si aún no ha terminado, espera hasta esperar_s y vuelve a dar el estado:
+        taladros_creo, taladros_conjugados, holguras_creo, crear_taladros, crear_patron, crear_redondeos, crear_chaflanes, crear_extrusion, crear_revolucion). Si aún no ha terminado, espera hasta esperar_s y vuelve a dar el estado:
         llámala otra vez. No repitas la herramienta original mientras siga en curso."""
         t = tareas.obtener(tarea_id)
         return tareas.entregar(t, min(esperar_s, tareas.espera_s))
@@ -1805,13 +1807,68 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
             propuestas_ext.pop(min(propuestas_ext, key=lambda k: propuestas_ext[k]["creada"]))
         propuestas_ext[codigo] = {"modelo": pl["resumen"]["modelo"], "plan": pl["plan"], "resumen": pl["resumen"],
                                   "creada": ahora, "ids_caras": pl["ids_caras"], "ids_planos": pl["ids_planos"],
-                                  "huella": huella(caras, pl["ids_caras"], pl["ids_planos"])}
+                                  "huella": huella(caras, pl["ids_caras"], pl["ids_planos"]), "clase": "extrusion"}
         gw.audit.write(event="propuesta_extrusion", modelo=pl["resumen"]["modelo"], codigo=codigo, tipo=tipo,
                        contornos=len(contornos))
         r = {"codigo": codigo, **pl["resumen"], "crear_activo": settings.allow_operaciones,
              "siguiente": ("Enseña la tabla (contornos con sus medidas, plano del croquis, extensión y sentido, "
                            "volumen teórico) y pide confirmación expresa. Solo entonces llama a crear_extrusion "
                            "con este código." if settings.allow_operaciones else
+                           "La creación está desactivada en esta instalación (CREO_MCP_ALLOW_OPERACIONES=1)."),
+             "fuente": "Creo Toolkit (caras y planos de la pieza)"}
+        if pl["avisos"]:
+            r["avisos"] = pl["avisos"]
+        return r
+
+    @mcp.tool(annotations=READ)
+    @guard
+    def proponer_revolucion(
+        tipo: Annotated[Literal["anadir", "quitar"], Field(
+            description="anadir: revolución que añade material (piezas torneadas); quitar: corte por revolución "
+                        "(gargantas, cajeados interiores, chaflanes de torneado)")],
+        plano: Annotated[str, Field(description="Plano del croquis que contiene el eje de giro: nombre de un plano de "
+                                                "referencia (ALZADO, PERFIL…) o id de una cara plana; normal a X, Y o Z")],
+        eje: Annotated[Literal["X", "Y", "Z"], Field(description="Dirección del eje de giro (en el plano del croquis)")],
+        contornos: Annotated[list[dict[str, Any]], Field(min_length=1, max_length=100, description=(
+            "Media sección, a un lado del eje, con los mismos tipos de contorno que proponer_extrusion y en "
+            "coordenadas de la pieza dentro del plano (normal a Z: [x, y]; a Y: [x, z]; a X: [y, z]). Lo habitual "
+            "es un 'perfil' con los escalones del eje: [[0,0],[10,0],[10,30],[6,30],[6,50],[0,50]] para un eje "
+            "Ø20×30 + Ø12×20 que gira sobre Y"))],
+        eje_desplazado: Annotated[float, Field(description="Posición del eje de giro en la otra coordenada del plano "
+                                                           "(0 = pasa por el origen)")] = 0.0,
+        angulo: Annotated[float, Field(gt=0, le=360, description="Grados; 360 = vuelta completa, menos de 360 "
+                                                                   "simétrico respecto al plano del croquis")] = 360.0,
+        modelo: ModelArg = None,
+    ) -> dict[str, Any]:
+        """Prepara una revolución (pieza torneada: ejes, casquillos, bridas, poleas) o un corte por
+        revolución SIN tocar Creo. El croquis es media sección a un lado del eje de giro; el eje es una
+        línea de centros del croquis paralela a X, Y o Z. Las cotas perpendiculares al eje se ponen como
+        diámetros (como en un plano de torno) y las axiales desde el plano de referencia. Calcula el
+        volumen teórico (Pappus). Devuelve la tabla y un `codigo`: enséñala y, solo con la confirmación
+        expresa del usuario, crea con crear_revolucion(codigo)."""
+        m = _pieza(modelo)
+        caras = _caras(m)
+        nombre = nombre_operacion("REV" if tipo == "anadir" else "CORTE_REV", f"{datetime.now():%H%M%S}")
+        try:
+            pl = planificar_revolucion({"tipo": tipo, "plano": plano, "eje": eje, "contornos": contornos,
+                                        "eje_desplazado": eje_desplazado, "angulo": angulo}, caras, nombre)
+        except PlanError as e:
+            raise ValueError(str(e)) from e
+        codigo = "R" + hashlib.sha256(pl["plan"].encode()).hexdigest()[:7].upper()
+        ahora = time.time()
+        for k in [k for k, v in propuestas_ext.items() if ahora - v["creada"] > PROPUESTA_VALIDA_S]:
+            propuestas_ext.pop(k, None)
+        while len(propuestas_ext) >= 10:
+            propuestas_ext.pop(min(propuestas_ext, key=lambda k: propuestas_ext[k]["creada"]))
+        propuestas_ext[codigo] = {"modelo": pl["resumen"]["modelo"], "plan": pl["plan"], "resumen": pl["resumen"],
+                                  "creada": ahora, "ids_caras": pl["ids_caras"], "ids_planos": pl["ids_planos"],
+                                  "huella": huella(caras, pl["ids_caras"], pl["ids_planos"]), "clase": "revolucion"}
+        gw.audit.write(event="propuesta_revolucion", modelo=pl["resumen"]["modelo"], codigo=codigo, tipo=tipo,
+                       contornos=len(contornos))
+        r = {"codigo": codigo, **pl["resumen"], "crear_activo": settings.allow_operaciones,
+             "siguiente": ("Enseña la tabla (media sección con sus medidas, eje de giro, ángulo, cotas y volumen "
+                           "teórico) y pide confirmación expresa. Solo entonces llama a crear_revolucion con este "
+                           "código." if settings.allow_operaciones else
                            "La creación está desactivada en esta instalación (CREO_MCP_ALLOW_OPERACIONES=1)."),
              "fuente": "Creo Toolkit (caras y planos de la pieza)"}
         if pl["avisos"]:
@@ -2014,40 +2071,60 @@ def build_server(settings: Settings, gateway: CreoGateway | None = None,
             llama IA_EXT_* o IA_CORTE_*; se comprueba que queda al lado pedido del plano y que el
             volumen cambia como debe (si no, se borra y se prueba el otro sentido). Nunca guarda. Para
             deshacer, borrar_operaciones_ia con su id."""
+            return _crear_croquis(codigo, "extrusion")
+
+        @mcp.tool(annotations=DRAW_DESTRUCTIVE)
+        @guard
+        @tareas.larga
+        def crear_revolucion(
+            codigo: Annotated[str, Field(description="Código que devolvió proponer_revolucion")],
+        ) -> dict[str, Any]:
+            """Crea en Creo la revolución o el corte por revolución de una propuesta ya confirmada por el
+            usuario. Solo con la confirmación expresa sobre la tabla de proponer_revolucion. Vuelve a leer
+            la pieza: si el plano o las referencias han cambiado, no crea nada. La operación se llama
+            IA_REV_* o IA_CORTE_REV_*; se comprueba que queda en su tramo del eje y que el volumen cambia
+            como debe. Nunca guarda. Para deshacer, borrar_operaciones_ia con su id."""
+            return _crear_croquis(codigo, "revolucion")
+
+        def _crear_croquis(codigo: str, clase: str) -> dict[str, Any]:
+            herramienta = "crear_extrusion" if clase == "extrusion" else "crear_revolucion"
+            propuesta = "proponer_extrusion" if clase == "extrusion" else "proponer_revolucion"
             if estado_ops["desconocido"]:
                 raise ValueError("Hay una escritura anterior con resultado desconocido. Comprueba Creo "
                                  "(operaciones_creo) y vuelve a proponer antes de crear nada.")
-            p = propuestas_ext.pop((codigo or "").strip().upper(), None)
-            if p is None:
-                raise ValueError("No hay ninguna propuesta de extrusión con ese código (vale una vez, 30 min). "
-                                 "Vuelve a llamar a proponer_extrusion.")
+            clave = (codigo or "").strip().upper()
+            p = propuestas_ext.get(clave)
+            if p is None or p.get("clase", "extrusion") != clase:
+                raise ValueError(f"No hay ninguna propuesta de {'extrusión' if clase == 'extrusion' else 'revolución'} "
+                                 f"con ese código (vale una vez, 30 min). Vuelve a llamar a {propuesta}.")
+            propuestas_ext.pop(clave, None)
             if time.time() - p["creada"] > PROPUESTA_VALIDA_S:
-                raise ValueError("La propuesta ha caducado (30 min). Vuelve a llamar a proponer_extrusion.")
+                raise ValueError(f"La propuesta ha caducado (30 min). Vuelve a llamar a {propuesta}.")
             caras = nat.ejecutar("caras", p["modelo"])
             if huella(caras, p["ids_caras"], p["ids_planos"]) != p["huella"]:
                 raise ValueError("La pieza ha cambiado desde la propuesta (plano del croquis o referencias): no se ha "
-                                 "creado nada. Vuelve a llamar a proponer_extrusion.")
+                                 f"creado nada. Vuelve a llamar a {propuesta}.")
             try:
                 r = nat.ejecutar("crear", plan=p["plan"])
             except NativoSinRespuesta as e:
                 estado_ops["desconocido"] = {**p["resumen"], "error": str(e)[:200]}
-                gw.audit.write(event="resultado_desconocido", tool="crear_extrusion", modelo=p["modelo"])
-                return {"estado": "resultado_desconocido", "extrusion": p["resumen"],
+                gw.audit.write(event="resultado_desconocido", tool=herramienta, modelo=p["modelo"])
+                return {"estado": "resultado_desconocido", clase: p["resumen"],
                         "que_hacer": "Creo no respondió a tiempo: la operación puede haberse creado o no. Comprueba "
                                      "con operaciones_creo si existe " + str(p["resumen"].get("nombre")) + "."}
             op = r.get("operacion") or {}
             gw.audit.write(event="operacion_creada", modelo=p["modelo"], id=op.get("id"), nombre=op.get("nombre"),
                            intentos=op.get("intentos"))
             return {"estado": "ok", "modelo": p["modelo"],
-                    "extrusion": {**p["resumen"], "id": op.get("id"), "nombre": op.get("nombre") or p["resumen"]["nombre"],
-                                  "intentos": op.get("intentos"), "cambio_volumen_mm3": op.get("cambio_volumen"),
-                                  "volumen_pieza_mm3": op.get("volumen_despues"),
-                                  "extension_en_eje": [op.get("extension_min"), op.get("extension_max")],
-                                  "cotas_croquis": op.get("cotas_croquis"),
-                                  "cotas_en_creo": [f"{c.get('tipo')} {c.get('valor'):.4f}" + (" (boceto)" if c.get("del_boceto") else "")
-                                                    for c in op.get("cotas", []) if isinstance(c.get("valor"), (int, float))],
-                                  "desviacion_croquis_mm": op.get("desviacion_croquis_mm"),
-                                  **({"avisos_croquis": op["avisos_croquis"]} if op.get("avisos_croquis") else {})},
+                    clase: {**p["resumen"], "id": op.get("id"), "nombre": op.get("nombre") or p["resumen"]["nombre"],
+                            "intentos": op.get("intentos"), "cambio_volumen_mm3": op.get("cambio_volumen"),
+                            "volumen_pieza_mm3": op.get("volumen_despues"),
+                            "extension_en_eje": [op.get("extension_min"), op.get("extension_max")],
+                            "cotas_croquis": op.get("cotas_croquis"),
+                            "cotas_en_creo": [f"{c.get('tipo')} {c.get('valor'):.4f}" + (" (boceto)" if c.get("del_boceto") else "")
+                                              for c in op.get("cotas", []) if isinstance(c.get("valor"), (int, float))],
+                            "desviacion_croquis_mm": op.get("desviacion_croquis_mm"),
+                            **({"avisos_croquis": op["avisos_croquis"]} if op.get("avisos_croquis") else {})},
                     "aviso": "Pieza modificada en la sesión de Creo, SIN GUARDAR. Revísala y guarda tú si estás conforme. "
                              "Para deshacer: borrar_operaciones_ia con su id."
                              + (" Las cotas del boceto chocaron con restricciones de Creo y el croquis quedó con el "

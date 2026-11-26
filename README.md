@@ -15,7 +15,7 @@ Asistente ──stdio──▶ creo-mcp-iac ──HTTP localhost──▶ CREOSO
   nativas, operaciones de taladro, caras, aristas y selección, y creación de taladros, patrones,
   redondeos, chaflanes, extrusiones y cortes con croquis.
 
-Versión 0.18.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nativo:
+Versión 0.19.1. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nativo:
 [`native/README.md`](native/README.md).
 
 ## Principios
@@ -53,6 +53,7 @@ Versión 0.18.0. Instalación: [`INSTALACION.md`](INSTALACION.md). Programa nati
 | `proponer_redondeos` / `crear_redondeos` | Redondeo de radio constante en las aristas elegidas (p. ej. esquinas interiores que la fresa no puede dejar vivas) | Redondeo `IA_RED_*`, sin guardar |
 | `proponer_chaflanes` / `crear_chaflanes` | Chaflán de distancia constante (45×D o D×D) en las aristas elegidas (romper aristas vivas, entradas de taladros y ejes) | Chaflán `IA_CHF_*`, sin guardar |
 | `proponer_extrusion` / `crear_extrusion` | Extrusión (añade material) o corte (quita) con un croquis de círculos, rectángulos, ranuras y perfiles de rectas y arcos, en un plano o cara normal a X, Y o Z; ciega, simétrica o pasante | Operación `IA_EXT_*` o `IA_CORTE_*`, sin guardar |
+| `proponer_revolucion` / `crear_revolucion` | Revolución (pieza torneada) o corte por revolución: media sección a un lado de un eje de giro paralelo a X, Y o Z, con cotas radiales como diámetros; 360° o un ángulo simétrico | Operación `IA_REV_*` o `IA_CORTE_REV_*`, sin guardar |
 | `taladros_conjugados` | Taladros enfrentados de piezas distintas en un conjunto: alineación frente a la holgura del tornillo y tamaños compatibles (roscado M6 con holgura M6) | Solo un fichero nuevo |
 | `holguras_creo` | Holguras mínimas entre piezas (distancia exacta de Creo) y estimación en frío por contracción de los materiales | Solo un fichero nuevo |
 | `borrar_operaciones_ia` | Deshace operaciones, patrones, redondeos, chaflanes, extrusiones y cortes `IA_*` | Borra `IA_*`, sin guardar |
@@ -123,6 +124,20 @@ automático. Si aun así chocan, se quitan y el croquis queda con el acotado aut
 (las del boceto marcadas) y la desviación de la geometría resuelta frente a la pedida
 (`desviacion_croquis_mm`). Los arcos por tres puntos redondean centro y radio a la milésima si
 están a menos de 5·10⁻⁵ (puntos de tangencia dados con decimales).
+
+### Revoluciones (0.19.0)
+
+`proponer_revolucion` prepara una pieza torneada (eje, casquillo, brida, polea) o un corte por
+revolución (garganta, cajeado interior): el croquis es **media sección** a un lado del eje de giro,
+en un plano que lo contenga (plano de referencia o cara), con los mismos contornos que las
+extrusiones. El eje de giro es una línea de centros del croquis paralela a X, Y o Z (`eje`), que
+pasa por el origen o a `eje_desplazado` de él. Las cotas perpendiculares al eje son **diámetros**
+respecto a la línea de centros, como en un plano de torno, y las axiales salen del plano de
+referencia. 360° (vuelta entera) o un ángulo simétrico respecto al plano del croquis. El volumen
+teórico sale del teorema de Pappus y se comprueba al crear (exacto en la primera operación; en un
+corte, que quite material y como mucho ese volumen). No se comprueba el tramo a lo largo del eje:
+un corte por revolución parte las caras cilíndricas y Creo da los trozos nuevos a la operación. `crear_revolucion` la crea tras la confirmación (`IA_REV_*`,
+`IA_CORTE_REV_*`), sin guardar.
 
 ## Holguras y criogenia
 

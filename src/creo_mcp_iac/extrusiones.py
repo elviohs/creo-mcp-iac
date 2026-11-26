@@ -312,6 +312,8 @@ def _describir_cota(ct: tuple, refs: list[dict[str, Any]]) -> str:
         return f"Ø{ct[2]:g}"
     if ct[0] == "radio":
         return f"R{ct[2]:g}"
+    if ct[0] == "diaeje":
+        return f"Ø{ct[4]:g} ({'lado' if ct[2] == 'w' else 'centro' if ct[2] == 'c' else 'vértice'}, al eje)"
     if ct[0] in ("ref", "refl"):
         ref = ct[3] if ct[0] == "ref" else ct[2]
         val = ct[4] if ct[0] == "ref" else ct[3]
@@ -320,7 +322,8 @@ def _describir_cota(ct: tuple, refs: list[dict[str, Any]]) -> str:
     return f"{ct[3]:g} entre lados"
 
 
-def _cotas_boceto(cts: list[dict[str, Any]], ejes_ref: dict[int, tuple[int, float]]) -> list[tuple]:
+def _cotas_boceto(cts: list[dict[str, Any]], ejes_ref: dict[int, tuple[int, float]],
+                  radial: tuple[int, float, int] | None = None) -> list[tuple]:
     """Cotas del boceto como las acotaría un delineante: diámetros y radios, posición de centros y
     vértices desde los planos de referencia, ancho y alto de los rectángulos. Para no chocar con las
     restricciones que pone Creo (radios iguales, concéntricos, alineados, tangentes), cada radio y
@@ -339,7 +342,17 @@ def _cotas_boceto(cts: list[dict[str, Any]], ejes_ref: dict[int, tuple[int, floa
         return True
 
     def pos(eje, valor, ent, pt, otro, recta=False):
-        """Cota desde la referencia del eje 0 (u) o 1 (v)."""
+        """Cota desde la referencia del eje 0 (u) o 1 (v). En una revolución, la coordenada
+        perpendicular al eje se acota como diámetro desde la línea de centros."""
+        if radial is not None and eje == radial[0]:
+            k = round(valor, 6)
+            d = abs(valor - radial[1])
+            if d < 1e-6 or k in hechas[eje]:
+                return
+            hechas[eje].add(k)
+            lugar = ((valor + radial[1]) / 2, otro + 6) if eje == 0 else (otro + 6, (valor + radial[1]) / 2)
+            out.append(("diaeje", ent, "w" if recta else pt, radial[2], 2 * d, lugar))
+            return
         if eje not in ejes_ref:
             return
         ref, origen = ejes_ref[eje]
@@ -376,16 +389,28 @@ def _cotas_boceto(cts: list[dict[str, Any]], ejes_ref: dict[int, tuple[int, floa
                 if nuevo_radio(c["r"]):
                     sg = segs[j]
                     out.append(("radio", base + j, c["r"], (sg[1][0] + 1.5 * c["r"], sg[1][1] - 1.5 * c["r"])))
-            if iz is not None and de is not None:
+            rad = radial[0] if radial is not None else None
+            # en una revolución, los dos lados paralelos al eje se acotan como diámetros
+            if rad == 0:
+                for lado, xv in ((iz, c["x0"]), (de, c["x1"])):
+                    if lado is not None:
+                        pos(0, xv, lado, None, (c["y0"] + c["y1"]) / 2, recta=True)
+            elif iz is not None and de is not None:
                 out.append(("entre", iz, de, c["x1"] - c["x0"], ((c["x0"] + c["x1"]) / 2, c["y1"] + 8)))
-            if ab is not None and ar is not None:
+            if rad == 1:
+                for lado, yv in ((ab, c["y0"]), (ar, c["y1"])):
+                    if lado is not None:
+                        pos(1, yv, lado, None, (c["x0"] + c["x1"]) / 2, recta=True)
+            elif ab is not None and ar is not None:
                 out.append(("entre", ab, ar, c["y1"] - c["y0"], (c["x1"] + 8, (c["y0"] + c["y1"]) / 2)))
-            if iz is not None:
+            if iz is not None and rad != 0:
                 pos(0, c["x0"], iz, None, (c["y0"] + c["y1"]) / 2, recta=True)
-            if ab is not None:
+            if ab is not None and rad != 1:
                 pos(1, c["y0"], ab, None, (c["x0"] + c["x1"]) / 2, recta=True)
-            hechas[0].add(round(c["x1"], 6))
-            hechas[1].add(round(c["y1"], 6))
+            if rad != 0:
+                hechas[0].add(round(c["x1"], 6))
+            if rad != 1:
+                hechas[1].add(round(c["y1"], 6))
             continue
         if c["tipo"] == "ranura":
             js = [j for j, sg in enumerate(segs) if sg[0] == "A"]
@@ -423,6 +448,76 @@ def _cotas_boceto(cts: list[dict[str, Any]], ejes_ref: dict[int, tuple[int, floa
     return out
 
 
+def _preparar_contornos(peticion: dict[str, Any]) -> tuple[list[dict[str, Any]], float]:
+    cts_in = peticion.get("contornos")
+    if not isinstance(cts_in, list) or not cts_in:
+        raise PlanError("contornos: lista con al menos un contorno cerrado.")
+    cts = [_contorno(ct, i) for i, ct in enumerate(cts_in)]
+    if sum(c["entidades"] for c in cts) > MAX_ENTIDADES:
+        raise PlanError(f"Demasiadas entidades en el croquis (máximo {MAX_ENTIDADES}).")
+    _comprobar_cruces(cts)
+    for i, c in enumerate(cts):
+        if c["area"] < 1e-6:
+            raise PlanError(f"contorno {i + 1}: área nula.")
+    # profundidad de anidamiento: par = material, impar = hueco
+    area = 0.0
+    for i, c in enumerate(cts):
+        nivel = sum(1 for j, d in enumerate(cts) if j != i and _dentro(c["poli"][0], d["poli"]))
+        c["hueco"] = nivel % 2 == 1
+        area += -c["area"] if c["hueco"] else c["area"]
+    if area <= 1e-6:
+        raise PlanError("El croquis no encierra área neta.")
+
+    return cts, area
+
+
+def _lineas_entidades(cts, p3, fmt) -> list[str]:
+    sk: list[str] = []
+    for c in cts:
+        for s in c["segs"]:
+            if s[0] == "C":
+                sk.append(f"sk_circulo {fmt(p3(s[1]) + [s[2]])}")
+            elif s[0] == "L":
+                sk.append(f"sk_linea {fmt(p3(s[1]) + p3(s[2]))}")
+            else:
+                _, cc, r, a1, sw = s
+                ini = (cc[0] + r * math.cos(a1), cc[1] + r * math.sin(a1))
+                fin = (cc[0] + r * math.cos(a1 + sw), cc[1] + r * math.sin(a1 + sw))
+                med = (cc[0] + r * math.cos(a1 + sw / 2), cc[1] + r * math.sin(a1 + sw / 2))
+                sk.append(f"sk_arco {fmt(p3(cc) + p3(ini) + p3(fin) + p3(med))}")
+    return sk
+
+
+def _ejes_de_referencia(refs, u, v) -> dict[int, tuple[int, float]]:
+    """Referencia del croquis que mide cada coordenada (u, v): plano normal a ese eje."""
+    ejes_ref: dict[int, tuple[int, float]] = {}
+    for i_r, r in enumerate(refs):
+        nr, orr = r.get("normal"), r.get("origen")
+        if not nr or not orr:
+            continue
+        for e_i, k_uv in enumerate((u, v)):
+            if abs(abs(nr[k_uv]) - 1) < 1e-9 and e_i not in ejes_ref:
+                ejes_ref[e_i] = (i_r, float(orr[k_uv]))
+    return ejes_ref
+
+
+def _lineas_cotas(cotas, p3, fmt) -> list[str]:
+    out = []
+    for ct in cotas:
+        lugar = fmt(p3(ct[-1]))
+        if ct[0] in ("diam", "radio"):
+            out.append(f"sk_cota {ct[0]} {ct[1]} {ct[2]:.6f} {lugar}")
+        elif ct[0] == "ref":
+            out.append(f"sk_cota ref {ct[1]} {ct[2]} {ct[3]} {ct[4]:.6f} {lugar}")
+        elif ct[0] == "refl":
+            out.append(f"sk_cota refl {ct[1]} {ct[2]} {ct[3]:.6f} {lugar}")
+        elif ct[0] == "diaeje":
+            out.append(f"sk_cota diaeje {ct[1]} {ct[2]} {ct[3]} {ct[4]:.6f} {lugar}")
+        else:
+            out.append(f"sk_cota entre {ct[1]} {ct[2]} {ct[3]:.6f} {lugar}")
+    return out
+
+
 def planificar_extrusion(peticion: dict[str, Any], caras: dict[str, Any], nombre: str) -> dict[str, Any]:
     """Plan para el servicio nativo (líneas e/sk_*/...) y resumen para la tabla de confirmación."""
     tipo = str(peticion.get("tipo") or "")
@@ -446,24 +541,7 @@ def planificar_extrusion(peticion: dict[str, Any], caras: dict[str, Any], nombre
     if tipo == "quitar" and not planas:
         raise PlanError("La pieza no tiene material: un corte no quitaría nada. Empieza por una extrusión que añada.")
 
-    cts_in = peticion.get("contornos")
-    if not isinstance(cts_in, list) or not cts_in:
-        raise PlanError("contornos: lista con al menos un contorno cerrado.")
-    cts = [_contorno(ct, i) for i, ct in enumerate(cts_in)]
-    if sum(c["entidades"] for c in cts) > MAX_ENTIDADES:
-        raise PlanError(f"Demasiadas entidades en el croquis (máximo {MAX_ENTIDADES}).")
-    _comprobar_cruces(cts)
-    for i, c in enumerate(cts):
-        if c["area"] < 1e-6:
-            raise PlanError(f"contorno {i + 1}: área nula.")
-    # profundidad de anidamiento: par = material, impar = hueco
-    area = 0.0
-    for i, c in enumerate(cts):
-        nivel = sum(1 for j, d in enumerate(cts) if j != i and _dentro(c["poli"][0], d["poli"]))
-        c["hueco"] = nivel % 2 == 1
-        area += -c["area"] if c["hueco"] else c["area"]
-    if area <= 1e-6:
-        raise PlanError("El croquis no encierra área neta.")
+    cts, area = _preparar_contornos(peticion)
 
     u, v = pl["ejes_uv"]
 
@@ -475,19 +553,7 @@ def planificar_extrusion(peticion: dict[str, Any], caras: dict[str, Any], nombre
     def fmt(vals):
         return " ".join(f"{x:.6f}" for x in vals)
 
-    sk: list[str] = []
-    for c in cts:
-        for s in c["segs"]:
-            if s[0] == "C":
-                sk.append(f"sk_circulo {fmt(p3(s[1]) + [s[2]])}")
-            elif s[0] == "L":
-                sk.append(f"sk_linea {fmt(p3(s[1]) + p3(s[2]))}")
-            else:
-                _, cc, r, a1, sw = s
-                ini = (cc[0] + r * math.cos(a1), cc[1] + r * math.sin(a1))
-                fin = (cc[0] + r * math.cos(a1 + sw), cc[1] + r * math.sin(a1 + sw))
-                med = (cc[0] + r * math.cos(a1 + sw / 2), cc[1] + r * math.sin(a1 + sw / 2))
-                sk.append(f"sk_arco {fmt(p3(cc) + p3(ini) + p3(fin) + p3(med))}")
+    sk = _lineas_entidades(cts, p3, fmt)
 
     refs = elegir_referencias(caras, pl["normal"])
     ftype, remove = TIPOS_EXT[tipo]
@@ -510,26 +576,8 @@ def planificar_extrusion(peticion: dict[str, Any], caras: dict[str, Any], nombre
     lineas = [f"modelo {modelo}", *e]
     lineas += [f"sk_ref 5 {r['id']}" for r in refs]
     lineas += sk
-    # referencia que mide cada coordenada del croquis (u, v): plano normal a ese eje
-    ejes_ref: dict[int, tuple[int, float]] = {}
-    for i_r, r in enumerate(refs):
-        nr, orr = r.get("normal"), r.get("origen")
-        if not nr or not orr:
-            continue
-        for e_i, k_uv in enumerate((u, v)):
-            if abs(abs(nr[k_uv]) - 1) < 1e-9 and e_i not in ejes_ref:
-                ejes_ref[e_i] = (i_r, float(orr[k_uv]))
-    cotas = _cotas_boceto(cts, ejes_ref)
-    for ct in cotas:
-        lugar = fmt(p3(ct[-1]))
-        if ct[0] in ("diam", "radio"):
-            lineas.append(f"sk_cota {ct[0]} {ct[1]} {ct[2]:.6f} {lugar}")
-        elif ct[0] == "ref":
-            lineas.append(f"sk_cota ref {ct[1]} {ct[2]} {ct[3]} {ct[4]:.6f} {lugar}")
-        elif ct[0] == "refl":
-            lineas.append(f"sk_cota refl {ct[1]} {ct[2]} {ct[3]:.6f} {lugar}")
-        else:
-            lineas.append(f"sk_cota entre {ct[1]} {ct[2]} {ct[3]:.6f} {lugar}")
+    cotas = _cotas_boceto(cts, _ejes_de_referencia(refs, u, v))
+    lineas += _lineas_cotas(cotas, p3, fmt)
     vol = area * prof if prof else None
     if ext in ("ciega", "pasante"):
         mas = sentido.startswith("+")
@@ -566,6 +614,147 @@ def planificar_extrusion(peticion: dict[str, Any], caras: dict[str, Any], nombre
                       f"pasante hasta el final de la pieza hacia {sentido}" if ext == "pasante" else
                       "pasante a los dos lados"),
         "volumen_teorico_mm3": round(vol, 3) if vol else None,
+        "referencias_croquis": [r.get("nombre") for r in refs],
+        "cotas_boceto": [_describir_cota(ct, refs) for ct in cotas],
+    }
+    return {"plan": "\n".join(lineas) + "\n", "resumen": resumen, "avisos": avisos,
+            "ids_caras": [pl["id"]] if any(x["id"] == pl["id"] for x in planas) else [],
+            "ids_planos": [r["id"] for r in refs] + ([] if any(x["id"] == pl["id"] for x in planas) else [pl["id"]])}
+
+
+# --------------------------------------------------------------- revoluciones
+
+ANG_FROM_NONE, ANG_TO_ANGLE, ANG_SYM = 1 << 18, 1 << 22, 1 << 29
+
+
+def _momento_radial(c: dict[str, Any], eje_uv: int, pos_eje: float) -> float:
+    """∫∫ r dA del contorno (r = distancia a la línea de centros), por integración de contorno con
+    los arcos divididos finamente (error relativo < 1e-6)."""
+    pts: list[tuple[float, float]] = []
+    for sg in c["segs"]:
+        if sg[0] == "L":
+            pts.append(sg[1])
+        else:
+            if sg[0] == "C":
+                cc, r, a1, sw = sg[1], sg[2], 0.0, 2 * math.pi
+            else:
+                _, cc, r, a1, sw = sg
+            n = max(16, math.ceil(abs(sw) / (math.pi / 2000)))
+            pts += [(cc[0] + r * math.cos(a1 + sw * i / n), cc[1] + r * math.sin(a1 + sw * i / n)) for i in range(n)]
+    # Green: ∫∫ f(w) dA con w la coordenada radial; f = |w - p| con el contorno a un solo lado del eje
+    tot = 0.0
+    otro = 1 - eje_uv
+    for i in range(len(pts)):
+        a, b = pts[i], pts[(i + 1) % len(pts)]
+        wa, wb = a[eje_uv] - pos_eje, b[eje_uv] - pos_eje
+        da = b[otro] - a[otro]
+        # ∮ (w²/2) d(otro), con signo según la orientación de los ejes
+        tot += (wa * wa + wa * wb + wb * wb) / 6 * da
+    signo = 1 if eje_uv == 0 else -1          # ∮ x²/2 dy = ∫∫ x dA ; ∮ -y²/2 dx = ∫∫ y dA
+    return abs(tot * signo)
+
+
+def planificar_revolucion(peticion: dict[str, Any], caras: dict[str, Any], nombre: str) -> dict[str, Any]:
+    """Revolución (añadir) o corte por revolución (quitar) de un perfil cerrado alrededor de una línea de
+    centros del croquis, paralela a un eje de la pieza. No toca Creo."""
+    tipo = str(peticion.get("tipo") or "")
+    if tipo not in TIPOS_EXT:
+        raise PlanError("tipo: 'anadir' (revolución, añade material) o 'quitar' (corte por revolución).")
+    pl = _plano_croquis(caras, peticion.get("plano") if peticion.get("plano") is not None else "")
+    k, c0 = pl["eje"], pl["coord"]
+    u, v = pl["ejes_uv"]
+    eje_txt = str(peticion.get("eje") or "").upper().lstrip("+-")
+    if eje_txt not in ("X", "Y", "Z") or "XYZ".index(eje_txt) == k:
+        posibles = " o ".join("XYZ"[i] for i in (u, v))
+        raise PlanError(f"eje: {posibles} (el eje de giro tiene que estar en el plano del croquis, normal a {'XYZ'[k]}).")
+    ka = "XYZ".index(eje_txt)
+    eje_uv_axial = (u, v).index(ka)            # coordenada del croquis a lo largo del eje
+    eje_uv_radial = 1 - eje_uv_axial           # coordenada perpendicular (radial)
+    pos_eje = float(peticion.get("eje_desplazado") or 0.0)
+    angulo = float(peticion.get("angulo") or 360.0)
+    if not 0 < angulo <= 360:
+        raise PlanError("angulo: entre 0 y 360 grados.")
+    planas = caras.get("caras_planas", [])
+    if tipo == "quitar" and not planas:
+        raise PlanError("La pieza no tiene material: un corte no quitaría nada. Empieza por una revolución que añada.")
+    cts, area = _preparar_contornos(peticion)
+    # todo el perfil a un lado de la línea de centros (puede tocarla)
+    lados = set()
+    for i, c in enumerate(cts):
+        for p in c["poli"]:
+            w = p[eje_uv_radial] - pos_eje
+            if abs(w) > 1e-6:
+                lados.add(w > 0)
+        for sg in c["segs"]:
+            if sg[0] in ("A", "C"):
+                cc, r = sg[1], sg[2]
+                if abs(cc[eje_uv_radial] - pos_eje) < r - 1e-6 and sg[0] == "C":
+                    raise PlanError(f"contorno {i + 1}: el círculo corta la línea de centros.")
+    if len(lados) > 1:
+        raise PlanError("El perfil cruza la línea de centros: dibuja solo la mitad de la sección, a un lado del eje.")
+    momento = sum(-_momento_radial(c, eje_uv_radial, pos_eje) if c["hueco"] else _momento_radial(c, eje_uv_radial, pos_eje)
+                  for c in cts)
+    vol = momento * math.radians(angulo)
+
+    def p3(p):
+        x = [0.0, 0.0, 0.0]
+        x[k], x[u], x[v] = c0, p[0], p[1]
+        return x
+
+    def fmt(vals):
+        return " ".join(f"{x:.6f}" for x in vals)
+
+    sk = _lineas_entidades(cts, p3, fmt)
+    n_ent = len(sk)
+    # línea de centros (última entidad): a lo largo del eje, por el eje desplazado
+    lo_ax = min(p[eje_uv_axial] for c in cts for p in c["poli"])
+    hi_ax = max(p[eje_uv_axial] for c in cts for p in c["poli"])
+    a2, b2 = [0.0, 0.0], [0.0, 0.0]
+    a2[eje_uv_radial] = b2[eje_uv_radial] = pos_eje
+    a2[eje_uv_axial], b2[eje_uv_axial] = lo_ax - 10, hi_ax + 10
+    sk.append(f"sk_eje {fmt(p3(a2) + p3(b2))}")
+
+    refs = elegir_referencias(caras, pl["normal"])
+    ftype, remove = TIPOS_EXT[tipo]
+    modelo = caras["modelo"]["nombre"] + ".PRT"
+    e = [f"e 386.387 i {ftype}", "e 386.388 i 2", "e 386.1956 i 917", f"e 386.2023 i {remove}", "e 386.3176 i 0",
+         "e 386.3280 i 1"]                           # eje: línea de centros del croquis
+    if angulo >= 360:
+        e += [f"e 386.6.437.439 i {ANG_FROM_NONE}", f"e 386.6.438.440 i {ANG_TO_ANGLE}", "e 386.6.438.442 d 360.0000"]
+    else:
+        e += [f"e 386.6.437.439 i {ANG_FROM_NONE}", f"e 386.6.438.440 i {ANG_SYM}", f"e 386.6.438.442 d {angulo:.4f}"]
+    e += [f"e 386.447.450.451 r 5 {pl['id']}", "e 386.447.450.452 i 1", "e 386.447.450.454 i 1",
+          f"e 386.447.450.455 r 5 {refs[0]['id']}", f"e 386.1964 w {nombre}"]
+    cuerpo = caras.get("cuerpo_por_defecto")
+    if cuerpo is not None:
+        e += ["e 386.6314.6315 i 2", f"e 386.6314.6316 r 98 {cuerpo}"]
+    lineas = [f"modelo {modelo}", *e]
+    lineas += [f"sk_ref 5 {r['id']}" for r in refs]
+    lineas += sk
+    ejes_ref = _ejes_de_referencia(refs, u, v)
+    cotas = _cotas_boceto(cts, ejes_ref, radial=(eje_uv_radial, pos_eje, n_ent))
+    lineas += _lineas_cotas(cotas, p3, fmt)
+    # Sin comprobación de tramo: un corte por revolución parte las caras cilíndricas que atraviesa y
+    # Creo da los trozos nuevos a la operación (garganta Y 12-15 en un Ø20 de Y 0-30: caras de 0 a 15,
+    # visto el 2026-11-26). Una revolución de 360° no tiene sentido que elegir; basta el volumen.
+    lineas.append(f"volumen_max {vol if tipo == 'anadir' else -vol:.6f}")
+
+    avisos = []
+    if tipo == "anadir" and not planas:
+        avisos.append("Primera operación de una pieza vacía: se comprueba que el volumen sea el del teorema de Pappus.")
+    nombres_uv = "".join("XYZ"[i] for i in (u, v))
+    radial_txt = "XYZ"[(u, v)[eje_uv_radial]]
+    resumen = {
+        "modelo": modelo, "nombre": nombre,
+        "operacion": "revolución (añade material)" if tipo == "anadir" else "corte por revolución (quita material)",
+        "croquis_en": f"{pl['que']} ({'XYZ'[k]} = {c0:g})",
+        "coordenadas_croquis": f"({nombres_uv[0].lower()}, {nombres_uv[1].lower()})",
+        "eje_de_giro": f"paralelo a {eje_txt}, en {radial_txt.lower()} = {pos_eje:g}",
+        "angulo": f"{angulo:g}°" + ("" if angulo >= 360 else " (simétrico respecto al plano del croquis)"),
+        "contornos": [{"n": i + 1, "descripcion": c["desc"], "area_mm2": round(c["area"], 3), "hueco": c["hueco"]}
+                      for i, c in enumerate(cts)],
+        "area_neta_mm2": round(area, 3),
+        "volumen_teorico_mm3": round(vol, 3),
         "referencias_croquis": [r.get("nombre") for r in refs],
         "cotas_boceto": [_describir_cota(ct, refs) for ct in cotas],
     }
